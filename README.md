@@ -313,7 +313,7 @@ astrbot_plugin_poker_game/
 ## 📞 支持
 
 如有问题或建议，请通过以下方式联系：
-- 提交 GitHub Issue：[https://github.com/shannai37/astrbot-plugin-poker-game/issues](https://github.com/shannai37/astrbot-plugin-poker-game/issues)
+- 提交 GitHub Issue：[shannai37/astrbot_plugin_poker_game](https://github.com/shannai37/astrbot_plugin_poker_game/issues)
 - 查看文档和FAQ
 
 ---
@@ -322,7 +322,8 @@ astrbot_plugin_poker_game/
 
 **作者：** 山萘  
 **版本：** v1.0.0  
-**GitHub：** [shannai37/astrbot-plugin-poker-game](https://github.com/shannai37/astrbot-plugin-poker-game)
+**GitHub：** [shannai37/astrbot_plugin_poker_game](https://github.com/shannai37/astrbot_plugin_poker_game?tab=readme-ov-file)
 
 🎰 享受德州扑克的乐趣吧！
+
 
