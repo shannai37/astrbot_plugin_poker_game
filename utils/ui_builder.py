@@ -705,7 +705,7 @@ class GameUIBuilder:
         bar = "█" * filled + "░" * empty
         return f"[{bar}] {progress_percent:.0f}%"
     
-    async def build_card_visual(self, cards: List[str]) -> str:
+    def build_card_visual(self, cards: List[str]) -> str:
         """
         构建扑克牌可视化
         

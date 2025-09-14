@@ -4,13 +4,6 @@ from astrbot.api import logger
 import astrbot.api.message_components as Comp
 from astrbot.core.utils.session_waiter import session_waiter, SessionController
 
-# 确保 logger 在模块级别可用
-try:
-    from astrbot.api import logger
-except ImportError:
-    import logging
-    logger = logging.getLogger(__name__)
-
 import asyncio
 import json
 from typing import Dict, List, Optional, Any
@@ -71,6 +64,9 @@ class TexasHoldemPlugin(Star):
             "max_players": 6
         }
         
+        # 记录插件启动时间
+        self.start_time = time.time()
+        
         logger.info("德州扑克插件初始化完成")
 
     async def initialize_plugin(self):
@@ -82,6 +78,8 @@ class TexasHoldemPlugin(Star):
         try:
             await self.database_manager.initialize()
             await self.player_manager.load_players()
+            # 启动自动保存任务
+            self.player_manager.start_auto_save()
             await self.room_manager.load_rooms()
             logger.info("德州扑克插件数据初始化完成")
         except Exception as e:
@@ -778,11 +776,8 @@ class TexasHoldemPlugin(Star):
                             await self._send_private_cards(event, player_id, room.game)
                         except Exception as e:
                             logger.error(f"发送手牌给玩家 {player_id} 失败: {e}")
-                            # 如果私聊失败，在群里发送（作为备选）
-                            player_cards = room.game.get_player_cards(player_id)
-                            if player_cards:
-                                cards_text = f"🎴 {player_id} 的手牌: {' '.join(player_cards)}"
-                                yield event.plain_result(cards_text)
+                            # 私聊失败时，不在公共频道显示手牌，只提示发送失败
+                            yield event.plain_result(f"⚠️ 无法向玩家 {player_id[:8]} 发送手牌，请检查好友关系或私聊设置。")
             else:
                 yield event.plain_result("❌ 游戏开始失败，请检查游戏状态")
                 
@@ -836,7 +831,7 @@ class TexasHoldemPlugin(Star):
                 return
             
             # 执行跟注操作
-            if room.game.player_action(user_id, PlayerAction.CALL):
+            if await room.game.handle_player_action(user_id, PlayerAction.CALL):
                 yield event.plain_result("✅ 跟注成功")
                 
                 # 发送游戏状态更新（群消息）
@@ -892,7 +887,7 @@ class TexasHoldemPlugin(Star):
                 yield event.plain_result(f"❌ 还没轮到您，当前行动玩家: {room.game.current_player_id}")
                 return
             
-            if room.game.player_action(user_id, PlayerAction.RAISE, amount):
+            if await room.game.handle_player_action(user_id, PlayerAction.RAISE, amount):
                 yield event.plain_result(f"✅ 加注 {amount} 成功")
                 
                 game_status = self.ui_builder.build_game_status(room.game)
@@ -961,7 +956,7 @@ class TexasHoldemPlugin(Star):
                 yield event.plain_result(f"❌ 还没轮到您，当前行动玩家: {room.game.current_player_id}")
                 return
             
-            if room.game.player_action(user_id, PlayerAction.FOLD):
+            if await room.game.handle_player_action(user_id, PlayerAction.FOLD):
                 yield event.plain_result("✅ 弃牌成功")
                 
                 game_status = self.ui_builder.build_game_status(room.game)
@@ -1003,7 +998,7 @@ class TexasHoldemPlugin(Star):
             player_info = game_state['players'].get(user_id, {})
             
             # 检查过牌是否有效
-            if room.game.player_action(user_id, PlayerAction.CHECK):
+            if await room.game.handle_player_action(user_id, PlayerAction.CHECK):
                 yield event.plain_result("✅ 过牌成功")
                 
                 game_status = self.ui_builder.build_game_status(room.game)
@@ -1056,7 +1051,7 @@ class TexasHoldemPlugin(Star):
                 yield event.plain_result(f"❌ 还没轮到您，当前行动玩家: {room.game.current_player_id}")
                 return
             
-            if room.game.player_action(user_id, PlayerAction.ALL_IN):
+            if await room.game.handle_player_action(user_id, PlayerAction.ALL_IN):
                 yield event.plain_result("✅ 全押成功")
                 
                 game_status = self.ui_builder.build_game_status(room.game)
@@ -1466,7 +1461,8 @@ class TexasHoldemPlugin(Star):
             # 系统统计
             lines.append("🖥️ 系统状态:")
             lines.append(f"  💾 数据库: {system_stats.get('database_path', 'N/A')}")
-            lines.append(f"  📅 运行时间: {self.ui_builder.format_time(time.time() - 3600)}")
+            runtime_seconds = time.time() - self.start_time
+            lines.append(f"  📅 运行时间: {self.ui_builder.format_time(runtime_seconds)}")
             lines.append("")
             
             # 玩家统计

@@ -223,6 +223,14 @@ class PlayerManager:
         # 自动保存任务
         self.auto_save_task: Optional[asyncio.Task] = None
         
+    def start_auto_save(self):
+        """
+        启动自动保存任务
+        """
+        if not self.auto_save_task or self.auto_save_task.done():
+            self.auto_save_task = asyncio.create_task(self.auto_save_task_loop())
+            logger.info("自动保存任务已启动")
+    
     def _init_achievements(self) -> Dict[str, Dict[str, Any]]:
         """
         初始化成就配置
@@ -1024,9 +1032,9 @@ class PlayerManager:
         except Exception as e:
             logger.error(f"加载玩家数据失败: {e}")
     
-    async def auto_save_task(self):
+    async def auto_save_task_loop(self):
         """
-        自动保存任务
+        自动保存任务循环
         """
         while True:
             try:
