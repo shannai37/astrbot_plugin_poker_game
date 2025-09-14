@@ -342,10 +342,8 @@ class CardSystem:
         # 判断是否顺子
         is_straight = self._is_straight(ranks)
         
-        # 特殊处理A-2-3-4-5顺子
-        if ranks == [14, 5, 4, 3, 2]:
-            is_straight = True
-            # A作为1处理
+        # 如果是A-5顺子，需要调整排序（A作为1处理）
+        if is_straight and ranks == [14, 5, 4, 3, 2]:
             ranks = [5, 4, 3, 2, 1]
             sorted_cards = sorted_cards[1:] + [sorted_cards[0]]  # A移到末尾
         
@@ -440,7 +438,7 @@ class CardSystem:
     
     def _is_straight(self, ranks: List[int]) -> bool:
         """
-        判断是否为顺子
+        判断是否为顺子，包含A-5顺子的特殊情况
         
         Args:
             ranks: 按降序排列的点数列表
@@ -448,11 +446,21 @@ class CardSystem:
         Returns:
             bool: 是否为顺子
         """
-        # 检查连续性
+        # 检查标准的连续性
+        is_normal_straight = True
         for i in range(len(ranks) - 1):
             if ranks[i] - ranks[i + 1] != 1:
-                return False
-        return True
+                is_normal_straight = False
+                break
+        
+        if is_normal_straight:
+            return True
+            
+        # 检查A-5顺子（A-2-3-4-5，即[14, 5, 4, 3, 2]）
+        if ranks == [14, 5, 4, 3, 2]:
+            return True
+            
+        return False
     
     def format_hand_evaluation(self, evaluation: HandEvaluation) -> str:
         """

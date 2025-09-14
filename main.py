@@ -51,7 +51,7 @@ class TexasHoldemPlugin(Star):
         super().__init__(context)
         
         # 初始化数据目录
-        self.data_dir = Path("data/texas_holdem")
+        self.data_dir = self.get_data_dir()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
         # 初始化核心组件
@@ -1071,78 +1071,42 @@ class TexasHoldemPlugin(Star):
             logger.error(f"全押操作失败: {e}")
             yield event.plain_result(f"❌ 全押失败: {str(e)}")
 
-    async def _handle_game_action(self, event: AstrMessageEvent, action: PlayerAction, amount: int = 0):
-        """
-        处理游戏中的玩家操作
-        
-        Args:
-            event: 消息事件对象
-            action: 玩家操作类型
-            amount: 操作金额（加注时使用）
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            # 查找玩家所在房间
-            room = await self.room_manager.get_player_room(user_id)
-            if not room or not room.game:
-                yield event.plain_result("❌ 您当前不在游戏中")
-                return
-            
-            # 检查是否轮到该玩家操作
-            if room.game.current_player_id != user_id:
-                yield event.plain_result("❌ 还没轮到您操作")
-                return
-            
-            # 执行操作
-            result = await room.game.handle_player_action(user_id, action, amount)
-            if result:
-                # 更新玩家数据
-                await self.player_manager.update_player_chips(user_id, room.game.get_player_chips(user_id))
-                
-                # 发送游戏状态更新
-                game_status = self.ui_builder.build_game_status(room.game)
-                yield event.plain_result(game_status)
-                
-                # 检查游戏是否结束
-                if room.game.is_game_over():
-                    await self._handle_game_end(room)
-            else:
-                yield event.plain_result("❌ 操作无效，请重试")
-                
-        except Exception as e:
-            logger.error(f"处理游戏操作失败: {e}")
-            yield event.plain_result(f"❌ 操作失败: {str(e)}")
 
-    async def _handle_game_end(self, room: GameRoom):
+    # ==================== 辅助方法 ====================
+    
+    async def _resolve_player_id(self, partial_id: str, filter_condition=None) -> Tuple[Optional[str], Optional[str]]:
         """
-        处理游戏结束
+        解析玩家ID，支持部分ID匹配
         
         Args:
-            room: 游戏房间对象
+            partial_id: 部分或完整的玩家ID
+            filter_condition: 可选的过滤条件函数
+            
+        Returns:
+            Tuple[Optional[str], Optional[str]]: (解析的玩家ID, 错误信息)
         """
-        try:
-            # 计算结果和奖励
-            results = room.game.get_game_results()
-            
-            # 更新玩家数据
-            for player_id, result in results.items():
-                await self.player_manager.update_game_result(
-                    player_id, result['profit'], result['won']
-                )
-            
-            # 发送游戏结果
-            result_text = self.ui_builder.build_game_results(results)
-            
-            # 这里需要向房间内所有玩家发送结果
-            # 由于AstrBot的限制，这里只能记录日志
-            logger.info(f"房间 {room.room_id} 游戏结束: {result_text}")
-            
-            # 重置房间状态
-            await self.room_manager.reset_room(room.room_id)
-            
-        except Exception as e:
-            logger.error(f"处理游戏结束失败: {e}")
+        # 如果是完整ID，直接返回
+        if len(partial_id) >= 8:
+            return partial_id, None
+        
+        # 部分ID匹配
+        all_players = await self.player_manager.get_all_players()
+        
+        # 应用过滤条件
+        if filter_condition:
+            matches = [p for p in all_players if p.player_id.startswith(partial_id) and filter_condition(p)]
+        else:
+            matches = [p for p in all_players if p.player_id.startswith(partial_id)]
+        
+        if not matches:
+            filter_desc = "符合条件的" if filter_condition else ""
+            return None, f"❌ 未找到{filter_desc}玩家: {partial_id}"
+        elif len(matches) > 1:
+            match_list = "\n".join([f"  • {p.player_id} ({p.display_name})" for p in matches[:5]])
+            filter_desc = "符合条件的" if filter_condition else ""
+            return None, f"❌ 找到多个匹配的{filter_desc}玩家:\n{match_list}"
+        else:
+            return matches[0].player_id, None
 
     # ==================== 管理员控制界面 ====================
     
@@ -1229,20 +1193,11 @@ class TexasHoldemPlugin(Star):
         """
         try:
             # 查找玩家
-            if len(player_id) < 8:
-                # 如果输入的是部分ID，尝试匹配
-                all_players = await self.player_manager.get_all_players()
-                matches = [p for p in all_players if p.player_id.startswith(player_id)]
-                
-                if not matches:
-                    yield event.plain_result(f"❌ 未找到玩家: {player_id}")
-                    return
-                elif len(matches) > 1:
-                    match_list = "\n".join([f"  • {p.player_id} ({p.display_name})" for p in matches[:5]])
-                    yield event.plain_result(f"❌ 找到多个匹配玩家:\n{match_list}")
-                    return
-                else:
-                    player_id = matches[0].player_id
+            resolved_player_id, error_msg = await self._resolve_player_id(player_id)
+            if error_msg:
+                yield event.plain_result(error_msg)
+                return
+            player_id = resolved_player_id
             
             # 执行封禁
             success = await self.player_manager.ban_player(player_id, reason, duration)
@@ -1274,20 +1229,12 @@ class TexasHoldemPlugin(Star):
             player_id: 玩家ID
         """
         try:
-            # 查找玩家（支持部分ID匹配）
-            if len(player_id) < 8:
-                all_players = await self.player_manager.get_all_players()
-                matches = [p for p in all_players if p.player_id.startswith(player_id) and p.is_banned]
-                
-                if not matches:
-                    yield event.plain_result(f"❌ 未找到被封禁的玩家: {player_id}")
-                    return
-                elif len(matches) > 1:
-                    match_list = "\n".join([f"  • {p.player_id} ({p.display_name})" for p in matches[:5]])
-                    yield event.plain_result(f"❌ 找到多个匹配的被封禁玩家:\n{match_list}")
-                    return
-                else:
-                    player_id = matches[0].player_id
+            # 查找玩家（支持部分ID匹配，只查找被封禁的玩家）
+            resolved_player_id, error_msg = await self._resolve_player_id(player_id, lambda p: p.is_banned)
+            if error_msg:
+                yield event.plain_result(error_msg.replace("符合条件的", "被封禁的"))
+                return
+            player_id = resolved_player_id
             
             success = await self.player_manager.unban_player(player_id)
             
@@ -1314,19 +1261,11 @@ class TexasHoldemPlugin(Star):
         """
         try:
             # 查找玩家（支持部分ID匹配）
-            if len(player_id) < 8:
-                all_players = await self.player_manager.get_all_players()
-                matches = [p for p in all_players if p.player_id.startswith(player_id)]
-                
-                if not matches:
-                    yield event.plain_result(f"❌ 未找到玩家: {player_id}")
-                    return
-                elif len(matches) > 1:
-                    match_list = "\n".join([f"  • {p.player_id} ({p.display_name})" for p in matches[:5]])
-                    yield event.plain_result(f"❌ 找到多个匹配玩家:\n{match_list}")
-                    return
-                else:
-                    player_id = matches[0].player_id
+            resolved_player_id, error_msg = await self._resolve_player_id(player_id)
+            if error_msg:
+                yield event.plain_result(error_msg)
+                return
+            player_id = resolved_player_id
             
             # 验证数量
             if amount == 0:
@@ -1363,19 +1302,11 @@ class TexasHoldemPlugin(Star):
         """
         try:
             # 查找玩家（支持部分ID匹配）
-            if len(player_id) < 8:
-                all_players = await self.player_manager.get_all_players()
-                matches = [p for p in all_players if p.player_id.startswith(player_id)]
-                
-                if not matches:
-                    yield event.plain_result(f"❌ 未找到玩家: {player_id}")
-                    return
-                elif len(matches) > 1:
-                    match_list = "\n".join([f"  • {p.player_id} ({p.display_name})" for p in matches[:5]])
-                    yield event.plain_result(f"❌ 找到多个匹配玩家:\n{match_list}")
-                    return
-                else:
-                    player_id = matches[0].player_id
+            resolved_player_id, error_msg = await self._resolve_player_id(player_id)
+            if error_msg:
+                yield event.plain_result(error_msg)
+                return
+            player_id = resolved_player_id
             
             # 确认操作
             success = await self.player_manager.reset_player_data(player_id, keep_chips)
@@ -1786,38 +1717,60 @@ class TexasHoldemPlugin(Star):
 
     async def _auto_cleanup_room(self, room):
         """
-        游戏结束后自动清理房间和玩家映射
+        游戏结束后重置房间状态，保留玩家列表以便继续下一局
         
         Args:
             room: 游戏房间对象
         """
         try:
-            logger.info(f"开始自动清理房间 {room.room_id}")
+            logger.info(f"开始重置房间 {room.room_id} 状态")
             
-            # 获取房间内所有玩家
-            player_ids = list(room.player_ids.copy())
+            # 检查玩家筹码，移除筹码不足的玩家
+            players_to_remove = []
+            remaining_players = []
             
-            # 清理每个玩家的映射关系（不返还筹码，因为游戏引擎已正确分配）
-            for player_id in player_ids:
+            for player_id in list(room.player_ids):
                 try:
-                    # 直接清理映射关系，不通过leave_room（避免重复返还筹码）
-                    room.player_ids.discard(player_id)
-                    self.room_manager.player_room_mapping.pop(player_id, None)
-                    logger.info(f"玩家 {player_id} 映射已清理，房间 {room.room_id}")
+                    player = await self.player_manager.get_or_create_player(player_id)
+                    
+                    # 如果玩家筹码不足最小买入要求，则移除
+                    if player.chips < room.min_buy_in:
+                        players_to_remove.append(player_id)
+                        logger.info(f"玩家 {player_id} 筹码不足，移出房间")
+                    else:
+                        remaining_players.append(player_id)
+                        
                 except Exception as e:
-                    logger.error(f"自动清理玩家 {player_id} 失败: {e}")
+                    logger.error(f"检查玩家 {player_id} 状态失败: {e}")
+                    players_to_remove.append(player_id)
+            
+            # 移除筹码不足的玩家
+            for player_id in players_to_remove:
+                room.player_ids.discard(player_id)
+                self.room_manager.player_room_mapping.pop(player_id, None)
             
             # 更新房间状态
-            room.current_players = 0
-            room.status = RoomStatus.FINISHED
+            room.current_players = len(remaining_players)
             
-            # 重置游戏状态
-            room.game = None
-            
-            logger.info(f"房间 {room.room_id} 自动清理完成")
+            # 如果还有足够玩家，将房间设置为等待状态；否则设置为完成状态
+            if room.current_players >= 2:
+                room.status = RoomStatus.WAITING
+                room.game = None  # 重置游戏实例，准备新游戏
+                logger.info(f"房间 {room.room_id} 已重置为等待状态，剩余玩家: {room.current_players}")
+            else:
+                room.status = RoomStatus.FINISHED
+                room.game = None
+                
+                # 如果房间内玩家不足，清空剩余玩家
+                for player_id in remaining_players:
+                    room.player_ids.discard(player_id)
+                    self.room_manager.player_room_mapping.pop(player_id, None)
+                room.current_players = 0
+                
+                logger.info(f"房间 {room.room_id} 玩家不足，设置为完成状态")
             
         except Exception as e:
-            logger.error(f"自动清理房间失败: {e}")
+            logger.error(f"重置房间状态失败: {e}")
 
     async def _get_player_display_name(self, player_id: str) -> str:
         """

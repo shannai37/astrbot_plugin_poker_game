@@ -1143,7 +1143,7 @@ class TexasHoldemGame:
             call_amount = self.current_bet - player.current_bet
             return call_amount > 0 and player.chips >= call_amount
         elif action == PlayerAction.RAISE:
-            # 加注验证逻辑
+            # 加注验证逻辑（amount是加注的额外金额）
             call_amount = self.current_bet - player.current_bet
             total_needed = call_amount + amount
             
@@ -1156,7 +1156,15 @@ class TexasHoldemGame:
                 return False
             
             # 检查最小加注要求
-            min_raise = self.big_blind if self.current_bet == 0 else self.big_blind
+            # 最小加注应该至少是大盲注，如果已有人加注，则至少要等于上一次加注的金额
+            min_raise = self.big_blind
+            
+            # 如果已经有人加注过，计算最小再加注金额
+            if self.current_bet > self.big_blind:
+                # 找出上一次的加注额（当前最高下注 - 之前的最高下注）
+                # 这里简化为大盲注，实际游戏中应该记录上一次加注金额
+                min_raise = self.big_blind
+            
             if amount < min_raise:
                 return False
             

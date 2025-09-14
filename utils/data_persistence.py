@@ -38,10 +38,6 @@ class DatabaseManager:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # 连接池配置
-        self.connection_pool_size = 5
-        self.connection_timeout = 30
-        
         # 表结构版本
         self.schema_version = 1
         
@@ -236,6 +232,40 @@ class DatabaseManager:
         await db.execute("UPDATE system_config SET config_value = ?, updated_at = ? WHERE config_key = 'schema_version'",
                         (str(to_version), time.time()))
     
+    # ==================== 辅助方法 ====================
+    
+    def _row_to_player_dict(self, row) -> Dict[str, Any]:
+        """
+        将数据库行转换为玩家信息字典
+        
+        Args:
+            row: 数据库查询结果行
+            
+        Returns:
+            Dict: 玩家信息字典
+        """
+        return {
+            'player_id': row[0],
+            'display_name': row[1],
+            'chips': row[2],
+            'level': row[3],
+            'experience': row[4],
+            'total_games': row[5],
+            'wins': row[6],
+            'losses': row[7],
+            'total_profit': row[8],
+            'best_hand': row[9],
+            'achievements': json.loads(row[10]) if row[10] else [],
+            'last_active': row[11],
+            'registration_time': row[12],
+            'daily_bonus_claimed': bool(row[13]),
+            'last_bonus_time': row[14],
+            'ban_status': bool(row[15]),
+            'ban_reason': row[16],
+            'ban_until': row[17],
+            'equipped_achievement': row[18]
+        }
+
     # ==================== 玩家数据操作 ====================
     
     async def save_player_data(self, player_id: str, player_data: Dict[str, Any]) -> bool:
@@ -316,27 +346,7 @@ class DatabaseManager:
                 row = await cursor.fetchone()
                 
                 if row:
-                    return {
-                        'player_id': row[0],
-                        'display_name': row[1],
-                        'chips': row[2],
-                        'level': row[3],
-                        'experience': row[4],
-                        'total_games': row[5],
-                        'wins': row[6],
-                        'losses': row[7],
-                        'total_profit': row[8],
-                        'best_hand': row[9],
-                        'achievements': json.loads(row[10]) if row[10] else [],
-                        'last_active': row[11],
-                        'registration_time': row[12],
-                        'daily_bonus_claimed': bool(row[13]),
-                        'last_bonus_time': row[14],
-                        'ban_status': bool(row[15]),
-                        'ban_reason': row[16],
-                        'ban_until': row[17],
-                        'equipped_achievement': row[18]
-                    }
+                    return self._row_to_player_dict(row)
                 
                 return None
                 
@@ -366,27 +376,7 @@ class DatabaseManager:
                 players = []
                 
                 for row in rows:
-                    players.append({
-                        'player_id': row[0],
-                        'display_name': row[1],
-                        'chips': row[2],
-                        'level': row[3],
-                        'experience': row[4],
-                        'total_games': row[5],
-                        'wins': row[6],
-                        'losses': row[7],
-                        'total_profit': row[8],
-                        'best_hand': row[9],
-                        'achievements': json.loads(row[10]) if row[10] else [],
-                        'last_active': row[11],
-                        'registration_time': row[12],
-                        'daily_bonus_claimed': bool(row[13]),
-                        'last_bonus_time': row[14],
-                        'ban_status': bool(row[15]),
-                        'ban_reason': row[16],
-                        'ban_until': row[17],
-                        'equipped_achievement': row[18]
-                    })
+                    players.append(self._row_to_player_dict(row))
                 
                 return players
                 
@@ -718,5 +708,10 @@ class DatabaseManager:
             return False
     
     async def close(self):
-        """关闭数据库连接"""
-        logger.info("数据库连接已关闭")
+        """
+        关闭数据库连接
+        
+        注意：由于使用aiosqlite，每个操作都创建独立连接，
+        此方法主要用于清理和日志记录
+        """
+        logger.info("数据库管理器已关闭")

@@ -784,9 +784,45 @@ class RoomManager:
         }
     
     async def load_rooms(self):
-        """从数据库加载房间数据"""
-        # 房间数据通常不持久化，重启后重新创建
-        logger.info("房间管理器初始化完成")
+        """
+        从数据库加载房间数据
+        
+        注意：由于游戏状态的复杂性，只恢复基本的房间信息，不恢复游戏中的状态
+        """
+        try:
+            # 尝试从数据库加载房间的基本信息
+            # 如果数据库管理器支持房间数据加载的话
+            if hasattr(self.database_manager, 'load_rooms'):
+                rooms_data = await self.database_manager.load_rooms()
+                
+                for room_data in rooms_data:
+                    # 只恢复等待状态的房间，游戏中的房间不恢复
+                    if room_data.get('status') == 'waiting':
+                        try:
+                            room = GameRoom(
+                                room_id=room_data['room_id'],
+                                room_name=room_data.get('room_name', f"房间_{room_data['room_id']}"),
+                                creator_id=room_data['creator_id'],
+                                small_blind=room_data['small_blind'],
+                                big_blind=room_data['big_blind'],
+                                max_players=room_data['max_players']
+                            )
+                            room.status = RoomStatus.WAITING
+                            self.rooms[room.room_id] = room
+                            
+                            logger.info(f"恢复房间: {room.room_id}")
+                            
+                        except Exception as e:
+                            logger.error(f"恢复房间数据失败: {e}")
+                            
+                logger.info(f"房间管理器初始化完成，恢复了 {len(self.rooms)} 个房间")
+            else:
+                # 数据库不支持房间持久化，使用默认初始化
+                logger.info("房间管理器初始化完成（不支持房间持久化）")
+                
+        except Exception as e:
+            logger.error(f"加载房间数据失败: {e}")
+            logger.info("房间管理器使用默认初始化")
     
     async def cleanup(self):
         """清理资源"""

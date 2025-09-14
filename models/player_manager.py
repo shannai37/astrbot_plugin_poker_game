@@ -220,6 +220,9 @@ class PlayerManager:
         self.last_save_time = time.time()
         self.auto_save_interval = 300  # 5分钟自动保存
         
+        # 自动保存任务
+        self.auto_save_task: Optional[asyncio.Task] = None
+        
     def _init_achievements(self) -> Dict[str, Dict[str, Any]]:
         """
         初始化成就配置
@@ -1041,4 +1044,6 @@ class PlayerManager:
         """
         清理资源
         """
+        if self.auto_save_task and not self.auto_save_task.done():
+            self.auto_save_task.cancel()
         await self.save_all_players()
