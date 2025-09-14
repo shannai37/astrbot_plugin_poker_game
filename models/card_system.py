@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import List, Tuple, Dict, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import random
 from collections import Counter
 
@@ -141,15 +141,8 @@ class HandEvaluation:
     hand_rank: HandRank
     primary_value: int
     secondary_value: int = 0
-    kickers: List[int] = None
-    best_cards: List[Card] = None
-    
-    def __post_init__(self):
-        """初始化后处理"""
-        if self.kickers is None:
-            self.kickers = []
-        if self.best_cards is None:
-            self.best_cards = []
+    kickers: List[int] = field(default_factory=list)
+    best_cards: List[Card] = field(default_factory=list)
     
     def __lt__(self, other) -> bool:
         """

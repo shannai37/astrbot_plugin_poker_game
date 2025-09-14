@@ -232,9 +232,9 @@ class RoomManager:
                 logger.warning(f"玩家 {creator_id} 已在房间 {existing_room_id} 中")
                 return None
         
-        # 生成房间ID（从1开始的简单数字）
-        room_id = str(self.next_room_number)
-        self.next_room_number += 1
+        # 生成房间ID（使用UUID确保唯一性）
+        room_id = str(uuid.uuid4())[:8]
+        self.next_room_number += 1  # 仍保留用于内部统计
         
         # 创建房间
         room = GameRoom(

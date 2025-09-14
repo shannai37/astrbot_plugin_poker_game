@@ -697,8 +697,9 @@ class DatabaseManager:
         try:
             import shutil
             
+            # 在线程池中执行同步操作，避免阻塞事件循环
             backup_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(self.db_path, backup_path)
+            await asyncio.to_thread(shutil.copy2, self.db_path, backup_path)
             
             logger.info(f"数据库备份完成: {backup_path}")
             return True

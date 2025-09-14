@@ -732,7 +732,7 @@ class GameUIBuilder:
                     else:
                         color_mark = "⚫"
                     
-                    card_strs.append(f"[{rank}{suit}]")
+                    card_strs.append(f"[{color_mark}{rank}{suit}]")
             
             return " ".join(card_strs)
             

@@ -67,7 +67,36 @@ class TexasHoldemPlugin(Star):
         # 记录插件启动时间
         self.start_time = time.time()
         
+        # 初始化命令处理器（新架构预览）
+        self._init_command_handlers()
+        
         logger.info("德州扑克插件初始化完成")
+    
+    def _init_command_handlers(self):
+        """
+        初始化命令处理器（新架构预览）
+        
+        注意：这是为了演示新架构而添加的，当前仍使用原有的命令处理方式。
+        未来可以逐步迁移命令到这些处理器中，实现职责分离。
+        """
+        try:
+            from .handlers.game_handler import GameCommandHandler
+            from .handlers.admin_handler import AdminCommandHandler
+            
+            # 创建处理器实例
+            self.game_handler = GameCommandHandler(self)
+            self.admin_handler = AdminCommandHandler(self)
+            
+            # 获取命令映射（供未来使用）
+            self.game_commands = self.game_handler.get_command_handlers()
+            self.admin_commands = self.admin_handler.get_command_handlers()
+            
+            logger.info("命令处理器初始化完成")
+            
+        except ImportError as e:
+            logger.warning(f"命令处理器导入失败: {e}")
+        except Exception as e:
+            logger.error(f"命令处理器初始化失败: {e}")
 
     async def initialize_plugin(self):
         """
@@ -1069,6 +1098,44 @@ class TexasHoldemPlugin(Star):
 
     # ==================== 辅助方法 ====================
     
+    async def _validate_player_turn(self, event: AstrMessageEvent, user_id: str):
+        """
+        验证玩家是否可以进行游戏操作
+        
+        Args:
+            event: 消息事件对象
+            user_id: 玩家ID
+            
+        Returns:
+            Tuple[Optional[GameRoom], Optional[str]]: (房间对象, 错误消息)
+            如果验证通过，返回 (room, None)
+            如果验证失败，返回 (None, error_message)
+        """
+        # 获取玩家所在房间
+        room = await self.room_manager.get_player_room(user_id)
+        if not room or not room.game:
+            return None, "❌ 您当前不在任何游戏中"
+        
+        # 检查是否轮到该玩家
+        current_player = room.game.current_player_id
+        if current_player != user_id:
+            # 获取详细的游戏状态用于诊断
+            game_state = room.game.get_game_state()
+            active_players = [pid for pid in room.game.player_order if room.game.players[pid].can_act()]
+            in_hand_players = [pid for pid in room.game.player_order if room.game.players[pid].is_in_hand()]
+            
+            error_msg = f"""❌ 还没轮到您行动
+👤 当前行动玩家: {current_player}
+🎯 您的ID: {user_id}
+👥 活跃玩家列表: {', '.join([pid[:8] for pid in active_players])}
+🃏 在牌局中: {', '.join([pid[:8] for pid in in_hand_players])}
+🎲 游戏阶段: {game_state['phase']}
+⏰ 请等待轮到您的回合"""
+            
+            return None, error_msg
+        
+        return room, None
+    
     async def _resolve_player_id(self, partial_id: str, filter_condition=None) -> Tuple[Optional[str], Optional[str]]:
         """
         解析玩家ID，支持部分ID匹配
@@ -1561,6 +1628,62 @@ class TexasHoldemPlugin(Star):
             logger.error(f"查看配置失败: {e}")
             yield event.plain_result(f"❌ 查看配置失败: {str(e)}")
 
+    async def _send_private_message(self, event: AstrMessageEvent, user_id: str, message: str) -> bool:
+        """
+        发送私聊消息的抽象方法
+        
+        Args:
+            event: 消息事件对象
+            user_id: 目标用户ID
+            message: 消息内容
+            
+        Returns:
+            bool: 是否发送成功
+        """
+        try:
+            platform_name = event.get_platform_name()
+            
+            if platform_name == "aiocqhttp":
+                return await self._send_private_message_aiocqhttp(event, user_id, message)
+            else:
+                # 其他平台可以在这里添加支持
+                logger.warning(f"平台 {platform_name} 暂不支持私聊发送")
+                return False
+                
+        except Exception as e:
+            logger.error(f"私聊发送失败: {e}")
+            return False
+    
+    async def _send_private_message_aiocqhttp(self, event: AstrMessageEvent, user_id: str, message: str) -> bool:
+        """
+        在 aiocqhttp 平台发送私聊消息
+        
+        Args:
+            event: 消息事件对象
+            user_id: 目标用户ID
+            message: 消息内容
+            
+        Returns:
+            bool: 是否发送成功
+        """
+        try:
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+            
+            if isinstance(event, AiocqhttpMessageEvent):
+                client = event.bot
+                await client.api.call_action('send_private_msg', 
+                                            user_id=user_id, 
+                                            message=message)
+                logger.info(f"成功发送私聊消息给用户 {user_id}")
+                return True
+            else:
+                logger.warning("事件类型不是AiocqhttpMessageEvent")
+                return False
+                
+        except Exception as e:
+            logger.error(f"aiocqhttp私聊发送失败: {e}")
+            return False
+    
     async def _send_private_cards(self, event: AstrMessageEvent, user_id: str, game):
         """
         私聊发送手牌信息给玩家
@@ -1581,25 +1704,16 @@ class TexasHoldemPlugin(Star):
             room_id = game.room_id
             cards_text = f"🏠 房间 {room_id}\n🎴 您的手牌: {' '.join(player_cards)}"
             
-            # 检查是否为NapCat平台
-            if event.get_platform_name() == "aiocqhttp":
-                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                
-                if isinstance(event, AiocqhttpMessageEvent):
-                    client = event.bot
-                    # 私聊发送
-                    await client.api.call_action('send_private_msg', 
-                                                user_id=user_id, 
-                                                message=cards_text)
-                    logger.info(f"成功发送私聊手牌给玩家 {user_id}")
-                else:
-                    logger.warning("事件类型不是AiocqhttpMessageEvent")
-            else:
-                # 非NapCat平台，在群里发送（但这不是私聊）
-                logger.warning(f"当前平台 {event.get_platform_name()} 不支持私聊，跳过发送手牌")
+            # 使用抽象的私聊发送方法
+            success = await self._send_private_message(event, user_id, cards_text)
+            if not success:
+                # 如果私聊发送失败，记录日志但不抛出异常
+                logger.warning(f"向玩家 {user_id} 发送手牌失败，可能是平台不支持或用户设置问题")
                 
         except Exception as e:
             logger.error(f"私聊发送手牌失败: {e}")
+            # 重新抛出异常，以便上层调用可以处理
+            raise
 
     async def _handle_game_end(self, room):
         """
