@@ -552,7 +552,7 @@ class PlayerManager:
         
         # 更新经验值（获胜+50，失败+10）
         exp_gain = 50 if won else 10
-        await self._add_experience(player, exp_gain)
+        self._add_experience(player, exp_gain)
         
         # 获取详细统计
         stats = await self.get_player_stats(player_id)
@@ -903,7 +903,7 @@ class PlayerManager:
         
         return True
     
-    async def _add_experience(self, player: PlayerInfo, exp_amount: int):
+    def _add_experience(self, player: PlayerInfo, exp_amount: int):
         """
         增加玩家经验值并处理升级
         
@@ -1054,6 +1054,80 @@ class PlayerManager:
             logger.info(f"已加载 {len(self.players)} 个玩家数据")
         except Exception as e:
             logger.error(f"加载玩家数据失败: {e}")
+    
+    async def search_players_by_prefix(self, prefix: str, filter_condition=None, limit: int = 10) -> List[PlayerInfo]:
+        """
+        通过前缀搜索玩家（优化版本）
+        
+        Args:
+            prefix: 玩家ID前缀
+            filter_condition: 可选的过滤条件函数
+            limit: 返回结果数量限制
+            
+        Returns:
+            List[PlayerInfo]: 匹配的玩家列表
+        """
+        try:
+            # 使用数据库层面的前缀搜索
+            players_data = await self.database_manager.search_players_by_prefix(prefix, limit * 2)  # 多获取一些以便过滤
+            
+            players = []
+            for player_data in players_data:
+                player = PlayerInfo.from_dict(player_data)
+                
+                # 应用过滤条件
+                if filter_condition is None or filter_condition(player):
+                    players.append(player)
+                    
+                    if len(players) >= limit:
+                        break
+            
+            return players
+            
+        except Exception as e:
+            logger.error(f"搜索玩家失败 {prefix}: {e}")
+            return []
+    
+    async def get_players_by_ids(self, player_ids: List[str]) -> List[PlayerInfo]:
+        """
+        批量获取多个玩家信息
+        
+        Args:
+            player_ids: 玩家ID列表
+            
+        Returns:
+            List[PlayerInfo]: 玩家信息列表
+        """
+        if not player_ids:
+            return []
+        
+        try:
+            # 优先从内存缓存中获取
+            cached_players = []
+            missing_ids = []
+            
+            for player_id in player_ids:
+                if player_id in self.players:
+                    cached_players.append(self.players[player_id])
+                else:
+                    missing_ids.append(player_id)
+            
+            # 批量从数据库获取缺失的玩家
+            if missing_ids:
+                players_data = await self.database_manager.get_players_by_ids(missing_ids)
+                
+                for player_data in players_data:
+                    player = PlayerInfo.from_dict(player_data)
+                    # 添加到缓存中
+                    self.players[player.player_id] = player
+                    cached_players.append(player)
+                    self.cache_dirty = True
+            
+            return cached_players
+            
+        except Exception as e:
+            logger.error(f"批量获取玩家失败: {e}")
+            return []
     
     async def auto_save_task_loop(self):
         """

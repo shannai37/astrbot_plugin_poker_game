@@ -525,36 +525,37 @@ class DatabaseManager:
         Returns:
             bool: 是否成功
         """
+        async def _save_stats_operation(db: aiosqlite.Connection) -> bool:
+            # 转换JSON字段
+            hand_type_wins_json = json.dumps(stats_data.get('hand_type_wins', {}))
+            position_stats_json = json.dumps(stats_data.get('position_stats', {}))
+            recent_games_json = json.dumps(stats_data.get('recent_games', []))
+            
+            await db.execute("""
+                INSERT OR REPLACE INTO player_stats (
+                    player_id, hand_type_wins, position_stats, recent_games,
+                    longest_winning_streak, longest_losing_streak, current_streak,
+                    biggest_win, biggest_loss, favorite_hand, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                player_id,
+                hand_type_wins_json,
+                position_stats_json,
+                recent_games_json,
+                stats_data.get('longest_winning_streak', 0),
+                stats_data.get('longest_losing_streak', 0),
+                stats_data.get('current_streak', 0),
+                stats_data.get('biggest_win', 0),
+                stats_data.get('biggest_loss', 0),
+                stats_data.get('favorite_hand'),
+                time.time()
+            ))
+            
+            await db.commit()
+            return True
+        
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                # 转换JSON字段
-                hand_type_wins_json = json.dumps(stats_data.get('hand_type_wins', {}))
-                position_stats_json = json.dumps(stats_data.get('position_stats', {}))
-                recent_games_json = json.dumps(stats_data.get('recent_games', []))
-                
-                await db.execute("""
-                    INSERT OR REPLACE INTO player_stats (
-                        player_id, hand_type_wins, position_stats, recent_games,
-                        longest_winning_streak, longest_losing_streak, current_streak,
-                        biggest_win, biggest_loss, favorite_hand, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    player_id,
-                    hand_type_wins_json,
-                    position_stats_json,
-                    recent_games_json,
-                    stats_data.get('longest_winning_streak', 0),
-                    stats_data.get('longest_losing_streak', 0),
-                    stats_data.get('current_streak', 0),
-                    stats_data.get('biggest_win', 0),
-                    stats_data.get('biggest_loss', 0),
-                    stats_data.get('favorite_hand'),
-                    time.time()
-                ))
-                
-                await db.commit()
-                return True
-                
+            return await self._execute_with_retry(_save_stats_operation)
         except Exception as e:
             logger.error(f"保存玩家统计失败 {player_id}: {e}")
             return False
@@ -569,32 +570,33 @@ class DatabaseManager:
         Returns:
             Dict: 统计数据字典
         """
+        async def _get_stats_operation(db: aiosqlite.Connection) -> Dict[str, Any]:
+            cursor = await db.execute("""
+                SELECT hand_type_wins, position_stats, recent_games,
+                       longest_winning_streak, longest_losing_streak, current_streak,
+                       biggest_win, biggest_loss, favorite_hand
+                FROM player_stats WHERE player_id = ?
+            """, (player_id,))
+            
+            row = await cursor.fetchone()
+            
+            if row:
+                return {
+                    'hand_type_wins': json.loads(row[0]) if row[0] else {},
+                    'position_stats': json.loads(row[1]) if row[1] else {},
+                    'recent_games': json.loads(row[2]) if row[2] else [],
+                    'longest_winning_streak': row[3],
+                    'longest_losing_streak': row[4],
+                    'current_streak': row[5],
+                    'biggest_win': row[6],
+                    'biggest_loss': row[7],
+                    'favorite_hand': row[8]
+                }
+            
+            return {}
+        
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                cursor = await db.execute("""
-                    SELECT hand_type_wins, position_stats, recent_games,
-                           longest_winning_streak, longest_losing_streak, current_streak,
-                           biggest_win, biggest_loss, favorite_hand
-                    FROM player_stats WHERE player_id = ?
-                """, (player_id,))
-                
-                row = await cursor.fetchone()
-                
-                if row:
-                    return {
-                        'hand_type_wins': json.loads(row[0]) if row[0] else {},
-                        'position_stats': json.loads(row[1]) if row[1] else {},
-                        'recent_games': json.loads(row[2]) if row[2] else [],
-                        'longest_winning_streak': row[3],
-                        'longest_losing_streak': row[4],
-                        'current_streak': row[5],
-                        'biggest_win': row[6],
-                        'biggest_loss': row[7],
-                        'favorite_hand': row[8]
-                    }
-                
-                return {}
-                
+            return await self._execute_with_retry(_get_stats_operation)
         except Exception as e:
             logger.error(f"获取玩家统计失败 {player_id}: {e}")
             return {}
@@ -609,13 +611,14 @@ class DatabaseManager:
         Returns:
             bool: 是否成功
         """
+        async def _reset_stats_operation(db: aiosqlite.Connection) -> bool:
+            await db.execute("DELETE FROM player_stats WHERE player_id = ?", (player_id,))
+            await db.execute("DELETE FROM achievements WHERE player_id = ?", (player_id,))
+            await db.commit()
+            return True
+        
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("DELETE FROM player_stats WHERE player_id = ?", (player_id,))
-                await db.execute("DELETE FROM achievements WHERE player_id = ?", (player_id,))
-                await db.commit()
-                return True
-                
+            return await self._execute_with_retry(_reset_stats_operation)
         except Exception as e:
             logger.error(f"重置玩家统计失败 {player_id}: {e}")
             return False
@@ -638,21 +641,22 @@ class DatabaseManager:
         Returns:
             bool: 是否成功
         """
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("""
-                    INSERT INTO transactions (
-                        player_id, amount, balance_before, balance_after,
-                        transaction_type, reason, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
+        async def _log_transaction_operation(db: aiosqlite.Connection) -> bool:
+            await db.execute("""
+                INSERT INTO transactions (
                     player_id, amount, balance_before, balance_after,
-                    transaction_type, reason, time.time()
-                ))
-                
-                await db.commit()
-                return True
-                
+                    transaction_type, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                player_id, amount, balance_before, balance_after,
+                transaction_type, reason, time.time()
+            ))
+            
+            await db.commit()
+            return True
+        
+        try:
+            return await self._execute_with_retry(_log_transaction_operation)
         except Exception as e:
             logger.error(f"记录交易日志失败: {e}")
             return False
@@ -668,33 +672,34 @@ class DatabaseManager:
         Returns:
             List[Dict]: 交易记录列表
         """
+        async def _get_transactions_operation(db: aiosqlite.Connection) -> List[Dict[str, Any]]:
+            cursor = await db.execute("""
+                SELECT transaction_id, amount, balance_before, balance_after,
+                       transaction_type, reason, created_at
+                FROM transactions 
+                WHERE player_id = ? 
+                ORDER BY created_at DESC 
+                LIMIT ?
+            """, (player_id, limit))
+            
+            rows = await cursor.fetchall()
+            transactions = []
+            
+            for row in rows:
+                transactions.append({
+                    'transaction_id': row[0],
+                    'amount': row[1],
+                    'balance_before': row[2],
+                    'balance_after': row[3],
+                    'transaction_type': row[4],
+                    'reason': row[5],
+                    'created_at': row[6]
+                })
+            
+            return transactions
+        
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                cursor = await db.execute("""
-                    SELECT transaction_id, amount, balance_before, balance_after,
-                           transaction_type, reason, created_at
-                    FROM transactions 
-                    WHERE player_id = ? 
-                    ORDER BY created_at DESC 
-                    LIMIT ?
-                """, (player_id, limit))
-                
-                rows = await cursor.fetchall()
-                transactions = []
-                
-                for row in rows:
-                    transactions.append({
-                        'transaction_id': row[0],
-                        'amount': row[1],
-                        'balance_before': row[2],
-                        'balance_after': row[3],
-                        'transaction_type': row[4],
-                        'reason': row[5],
-                        'created_at': row[6]
-                    })
-                
-                return transactions
-                
+            return await self._execute_with_retry(_get_transactions_operation)
         except Exception as e:
             logger.error(f"获取玩家交易记录失败 {player_id}: {e}")
             return []
@@ -712,33 +717,114 @@ class DatabaseManager:
         Returns:
             bool: 是否成功
         """
+        async def _save_game_record_operation(db: aiosqlite.Connection) -> bool:
+            players_json = json.dumps(game_data.get('players', []))
+            hand_results_json = json.dumps(game_data.get('hand_results', {}))
+            
+            await db.execute("""
+                INSERT INTO game_records (
+                    room_id, game_type, players, winner_id,
+                    game_duration, final_pot, hand_results, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                room_id,
+                game_data.get('game_type', 'texas_holdem'),
+                players_json,
+                game_data.get('winner_id'),
+                game_data.get('game_duration', 0),
+                game_data.get('final_pot', 0),
+                hand_results_json,
+                time.time()
+            ))
+            
+            await db.commit()
+            return True
+        
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                players_json = json.dumps(game_data.get('players', []))
-                hand_results_json = json.dumps(game_data.get('hand_results', {}))
-                
-                await db.execute("""
-                    INSERT INTO game_records (
-                        room_id, game_type, players, winner_id,
-                        game_duration, final_pot, hand_results, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    room_id,
-                    game_data.get('game_type', 'texas_holdem'),
-                    players_json,
-                    game_data.get('winner_id'),
-                    game_data.get('game_duration', 0),
-                    game_data.get('final_pot', 0),
-                    hand_results_json,
-                    time.time()
-                ))
-                
-                await db.commit()
-                return True
-                
+            return await self._execute_with_retry(_save_game_record_operation)
         except Exception as e:
             logger.error(f"保存游戏记录失败: {e}")
             return False
+    
+    # ==================== 玩家查询操作 ====================
+    
+    async def search_players_by_prefix(self, prefix: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        通过前缀搜索玩家（数据库层面优化）
+        
+        Args:
+            prefix: 玩家ID前缀
+            limit: 返回结果数量限制
+            
+        Returns:
+            List[Dict]: 匹配的玩家数据列表
+        """
+        async def _search_operation(db: aiosqlite.Connection) -> List[Dict[str, Any]]:
+            cursor = await db.execute("""
+                SELECT player_id, display_name, chips, level, experience,
+                       total_games, wins, losses, total_profit, best_hand,
+                       achievements, last_active, registration_time,
+                       daily_bonus_claimed, last_bonus_time, ban_status,
+                       ban_reason, ban_until, equipped_achievement
+                FROM players 
+                WHERE player_id LIKE ? 
+                ORDER BY last_active DESC
+                LIMIT ?
+            """, (f"{prefix}%", limit))
+            
+            rows = await cursor.fetchall()
+            players = []
+            
+            for row in rows:
+                players.append(self._row_to_player_dict(row))
+            
+            return players
+        
+        try:
+            return await self._execute_with_retry(_search_operation)
+        except Exception as e:
+            logger.error(f"搜索玩家失败 {prefix}: {e}")
+            return []
+    
+    async def get_players_by_ids(self, player_ids: List[str]) -> List[Dict[str, Any]]:
+        """
+        批量获取多个玩家信息
+        
+        Args:
+            player_ids: 玩家ID列表
+            
+        Returns:
+            List[Dict]: 玩家数据列表
+        """
+        if not player_ids:
+            return []
+            
+        async def _batch_get_operation(db: aiosqlite.Connection) -> List[Dict[str, Any]]:
+            # 构建 IN 查询
+            placeholders = ','.join('?' * len(player_ids))
+            cursor = await db.execute(f"""
+                SELECT player_id, display_name, chips, level, experience,
+                       total_games, wins, losses, total_profit, best_hand,
+                       achievements, last_active, registration_time,
+                       daily_bonus_claimed, last_bonus_time, ban_status,
+                       ban_reason, ban_until, equipped_achievement
+                FROM players 
+                WHERE player_id IN ({placeholders})
+            """, player_ids)
+            
+            rows = await cursor.fetchall()
+            players = []
+            
+            for row in rows:
+                players.append(self._row_to_player_dict(row))
+            
+            return players
+        
+        try:
+            return await self._execute_with_retry(_batch_get_operation)
+        except Exception as e:
+            logger.error(f"批量获取玩家失败: {e}")
+            return []
     
     # ==================== 统计查询 ====================
     

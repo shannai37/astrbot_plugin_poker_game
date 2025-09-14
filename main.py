@@ -907,7 +907,8 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result(debug_info)
 
     @filter.command("poker_raise")
-    async def game_raise(self, event: AstrMessageEvent, amount: int):
+    @handle_plugin_exception("加注操作")
+    async def game_raise(self, event: AstrMessageEvent, amount: int = None):
         """
         加注操作
         
@@ -917,42 +918,46 @@ class TexasHoldemPlugin(Star):
         """
         user_id = event.get_sender_id()
         
-        try:
-            room = await self.room_manager.get_player_room(user_id)
-            if not room or not room.game:
-                yield event.plain_result("❌ 您当前不在任何游戏中")
-                return
+        # 检查是否提供了加注金额
+        if amount is None:
+            yield event.plain_result("❌ 请指定加注金额\n💡 使用格式: /poker_raise [金额]")
+            return
+        
+        room = await self.room_manager.get_player_room(user_id)
+        if not room or not room.game:
+            yield event.plain_result("❌ 您当前不在任何游戏中")
+            return
+        
+        # 检查是否轮到该玩家
+        if room.game.current_player_id != user_id:
+            yield event.plain_result(f"❌ 还没轮到您，当前行动玩家: {room.game.current_player_id}")
+            return
+        
+        if await room.game.handle_player_action(user_id, PlayerAction.RAISE, amount):
+            yield event.plain_result(f"✅ 加注 {amount} 成功")
             
-            # 检查是否轮到该玩家
-            if room.game.current_player_id != user_id:
-                yield event.plain_result(f"❌ 还没轮到您，当前行动玩家: {room.game.current_player_id}")
-                return
+            game_status = self.ui_builder.build_game_status(room.game)
+            yield event.plain_result(game_status)
             
-            if await room.game.handle_player_action(user_id, PlayerAction.RAISE, amount):
-                yield event.plain_result(f"✅ 加注 {amount} 成功")
-                
-                game_status = self.ui_builder.build_game_status(room.game)
-                yield event.plain_result(game_status)
-                
-                if room.game.is_game_over():
-                    await self._handle_game_end(room)
-            else:
-                # 获取详细的游戏状态用于诊断
-                game_state = room.game.get_game_state()
-                player_info = game_state['players'].get(user_id, {})
-                
-                current_bet = game_state.get('current_bet', 0)
-                player_current_bet = player_info.get('current_bet', 0)
-                player_chips = player_info.get('chips', 0)
-                player_status = player_info.get('status', 'unknown')
-                game_phase = game_state.get('phase', 'unknown')
-                
-                # 计算加注需要的金额
-                call_amount = current_bet - player_current_bet
-                total_needed = call_amount + amount
-                min_raise = room.game.big_blind
-                
-                debug_info = f"""❌ 无法加注，游戏状态诊断：
+            if room.game.is_game_over():
+                await self._handle_game_end(room)
+        else:
+            # 获取详细的游戏状态用于诊断
+            game_state = room.game.get_game_state()
+            player_info = game_state['players'].get(user_id, {})
+            
+            current_bet = game_state.get('current_bet', 0)
+            player_current_bet = player_info.get('current_bet', 0)
+            player_chips = player_info.get('chips', 0)
+            player_status = player_info.get('status', 'unknown')
+            game_phase = game_state.get('phase', 'unknown')
+            
+            # 计算加注需要的金额
+            call_amount = current_bet - player_current_bet
+            total_needed = call_amount + amount
+            min_raise = room.game.big_blind
+            
+            debug_info = f"""❌ 无法加注，游戏状态诊断：
 🎮 游戏阶段: {game_phase}
 💰 当前最高下注: {current_bet}
 🎯 您的当前下注: {player_current_bet}
@@ -969,12 +974,8 @@ class TexasHoldemPlugin(Star):
 ✓ 加注金额 > 0: {amount > 0}
 ✓ 总需要金额 <= 筹码: {total_needed} <= {player_chips} = {total_needed <= player_chips}
 ✓ 加注金额 >= 最小要求: {amount} >= {min_raise} = {amount >= min_raise}"""
-                
-                yield event.plain_result(debug_info)
-                
-        except Exception as e:
-            logger.error(f"加注操作失败: {e}")
-            yield event.plain_result(f"❌ 加注失败: {str(e)}")
+            
+            yield event.plain_result(debug_info)
 
     @filter.command("poker_fold")
     async def game_fold(self, event: AstrMessageEvent):
@@ -1150,7 +1151,7 @@ class TexasHoldemPlugin(Star):
     
     async def _resolve_player_id(self, partial_id: str, filter_condition=None) -> Tuple[Optional[str], Optional[str]]:
         """
-        解析玩家ID，支持部分ID匹配
+        解析玩家ID，支持部分ID匹配（优化版本）
         
         Args:
             partial_id: 部分或完整的玩家ID
@@ -1163,14 +1164,8 @@ class TexasHoldemPlugin(Star):
         if len(partial_id) >= 8:
             return partial_id, None
         
-        # 部分ID匹配
-        all_players = await self.player_manager.get_all_players()
-        
-        # 应用过滤条件
-        if filter_condition:
-            matches = [p for p in all_players if p.player_id.startswith(partial_id) and filter_condition(p)]
-        else:
-            matches = [p for p in all_players if p.player_id.startswith(partial_id)]
+        # 使用优化的前缀搜索
+        matches = await self.player_manager.search_players_by_prefix(partial_id, filter_condition, limit=10)
         
         if not matches:
             filter_desc = "符合条件的" if filter_condition else ""
@@ -1657,10 +1652,18 @@ class TexasHoldemPlugin(Star):
         try:
             platform_name = event.get_platform_name()
             
-            if platform_name == "aiocqhttp":
-                return await self._send_private_message_aiocqhttp(event, user_id, message)
+            # 使用平台适配器模式来处理不同平台
+            platform_handlers = {
+                "aiocqhttp": self._send_private_message_aiocqhttp,
+                # 这里可以轻松添加其他平台支持
+                # "telegram": self._send_private_message_telegram,
+                # "discord": self._send_private_message_discord,
+            }
+            
+            handler = platform_handlers.get(platform_name)
+            if handler:
+                return await handler(event, user_id, message)
             else:
-                # 其他平台可以在这里添加支持
                 logger.warning(f"平台 {platform_name} 暂不支持私聊发送")
                 return False
                 
@@ -1681,22 +1684,39 @@ class TexasHoldemPlugin(Star):
             bool: 是否发送成功
         """
         try:
-            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-            
-            if isinstance(event, AiocqhttpMessageEvent):
-                client = event.bot
-                await client.api.call_action('send_private_msg', 
-                                            user_id=user_id, 
-                                            message=message)
-                logger.info(f"成功发送私聊消息给用户 {user_id}")
-                return True
-            else:
-                logger.warning("事件类型不是AiocqhttpMessageEvent")
+            # 使用动态导入来避免硬编码依赖
+            try:
+                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                
+                if isinstance(event, AiocqhttpMessageEvent):
+                    client = event.bot
+                    await client.api.call_action('send_private_msg', 
+                                                user_id=user_id, 
+                                                message=message)
+                    logger.info(f"成功发送私聊消息给用户 {user_id}")
+                    return True
+                else:
+                    logger.warning("事件类型不匹配")
+                    return False
+                    
+            except ImportError as import_error:
+                logger.warning(f"aiocqhttp模块导入失败: {import_error}")
                 return False
                 
         except Exception as e:
             logger.error(f"aiocqhttp私聊发送失败: {e}")
             return False
+    
+    # 未来可以添加其他平台的私聊处理方法
+    # async def _send_private_message_telegram(self, event: AstrMessageEvent, user_id: str, message: str) -> bool:
+    #     """Telegram平台私聊发送"""
+    #     # TODO: 实现Telegram私聊发送逻辑
+    #     return False
+    # 
+    # async def _send_private_message_discord(self, event: AstrMessageEvent, user_id: str, message: str) -> bool:
+    #     """Discord平台私聊发送"""  
+    #     # TODO: 实现Discord私聊发送逻辑
+    #     return False
     
     async def _send_private_cards(self, event: AstrMessageEvent, user_id: str, game):
         """
@@ -1849,24 +1869,29 @@ class TexasHoldemPlugin(Star):
         try:
             logger.info(f"开始重置房间 {room.room_id} 状态")
             
+            # 批量获取所有玩家信息，避免 N+1 查询
+            all_players = await self.player_manager.get_players_by_ids(list(room.player_ids))
+            
+            # 构建玩家ID到玩家对象的映射
+            player_map = {p.player_id: p for p in all_players}
+            
             # 检查玩家筹码，移除筹码不足的玩家
             players_to_remove = []
             remaining_players = []
             
             for player_id in list(room.player_ids):
-                try:
-                    player = await self.player_manager.get_or_create_player(player_id)
-                    
-                    # 如果玩家筹码不足最小买入要求，则移除
-                    if player.chips < room.min_buy_in:
-                        players_to_remove.append(player_id)
-                        logger.info(f"玩家 {player_id} 筹码不足，移出房间")
-                    else:
-                        remaining_players.append(player_id)
-                        
-                except Exception as e:
-                    logger.error(f"检查玩家 {player_id} 状态失败: {e}")
+                player = player_map.get(player_id)
+                if not player:
                     players_to_remove.append(player_id)
+                    logger.warning(f"玩家 {player_id} 数据不存在，移出房间")
+                    continue
+                
+                # 如果玩家筹码不足最小买入要求，则移除
+                if player.chips < room.min_buy_in:
+                    players_to_remove.append(player_id)
+                    logger.info(f"玩家 {player_id} 筹码不足，移出房间")
+                else:
+                    remaining_players.append(player_id)
             
             # 移除筹码不足的玩家
             for player_id in players_to_remove:

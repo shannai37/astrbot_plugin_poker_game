@@ -586,21 +586,25 @@ class RoomManager:
         room.status = RoomStatus.WAITING
         room.update_activity()
         
-        # 检查玩家筹码，移除筹码不足的玩家
+        # 批量检查和处理筹码不足的玩家
         if room.game:
             players_to_remove = []
+            chip_refunds = []
             
+            # 收集需要移除的玩家和退款信息
             for player_id in list(room.player_ids):
                 player_chips = room.game.get_player_chips(player_id)
                 if player_chips < room.min_buy_in:
                     players_to_remove.append(player_id)
-                    # 返还剩余筹码
                     if player_chips > 0:
-                        await self.player_manager.add_chips(player_id, player_chips, "游戏结束返还")
+                        chip_refunds.append((player_id, player_chips))
             
-            # 移除筹码不足的玩家
-            for player_id in players_to_remove:
-                await self.leave_room(room_id, player_id)
+            # 批量返还筹码
+            for player_id, chips in chip_refunds:
+                await self.player_manager.add_chips(player_id, chips, "游戏结束返还")
+            
+            # 批量移除玩家（避免 N 次 leave_room 调用）
+            await self._batch_remove_players(room, players_to_remove)
         
         # 处理等待列表
         await self._process_waiting_list(room)
@@ -681,6 +685,26 @@ class RoomManager:
             room.status = RoomStatus.WAITING
             logger.warning(f"房间 {room.room_id} 游戏启动失败")
             return False
+    
+    async def _batch_remove_players(self, room: GameRoom, player_ids: List[str]):
+        """
+        批量移除玩家，避免 N+1 查询
+        
+        Args:
+            room: 房间对象
+            player_ids: 要移除的玩家ID列表
+        """
+        for player_id in player_ids:
+            # 直接从房间和映射中移除
+            room.player_ids.discard(player_id)
+            self.player_room_mapping.pop(player_id, None)
+        
+        # 更新房间玩家数
+        room.current_players = len(room.player_ids)
+        
+        # 记录日志
+        if player_ids:
+            logger.info(f"批量从房间 {room.room_id} 移除 {len(player_ids)} 个玩家: {[pid[:8] for pid in player_ids]}")
     
     async def _process_waiting_list(self, room: GameRoom):
         """
