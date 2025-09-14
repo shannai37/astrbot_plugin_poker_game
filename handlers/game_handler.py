@@ -1,6 +1,7 @@
-from typing import Dict, AsyncGenerator
+from typing import Dict, AsyncGenerator, Tuple, Optional
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api import logger
+import time
 from .base_handler import BaseCommandHandler
 
 
@@ -38,53 +39,58 @@ class GameCommandHandler(BaseCommandHandler):
             'poker_equip': self.handle_equip_achievement,
         }
     
-    async def handle_join_room(self, event: AstrMessageEvent, room_id: str = None) -> AsyncGenerator:
+    async def handle_join_room(self, event: AstrMessageEvent, room_id: str = "") -> AsyncGenerator:
         """
         处理加入房间命令
         
         Args:
             event: 消息事件对象
-            room_id: 房间ID（可选，用于快速匹配）
+            room_id: 房间ID（为空时快速匹配）
         """
         user_id = event.get_sender_id()
         
-        # 确保玩家已注册
-        if not await self.require_player_registration(event, user_id):
-            yield event.plain_result("❌ 玩家注册失败")
-            return
-        
         try:
-            # 检查玩家是否已在房间中
-            current_room = await self.room_manager.get_player_room(user_id)
-            if current_room:
-                yield event.plain_result(f"❌ 您已在房间 {current_room.room_id} 中")
+            # 检查封禁状态
+            ban_error = await self._check_player_ban_status(user_id)
+            if ban_error:
+                yield event.plain_result(ban_error)
                 return
             
-            # 加入房间逻辑
+            # 检查玩家是否已在游戏中
+            current_room = await self.room_manager.get_player_room(user_id)
+            if current_room:
+                yield event.plain_result(f"❌ 您已在房间 {current_room.room_id} 中，请先离开当前游戏")
+                return
+            
+            # 检查积分是否足够
+            player = await self.player_manager.get_or_create_player(user_id)
+            if player.chips <= 0:
+                yield event.plain_result("❌ 积分不足，无法加入游戏。请联系管理员充值。")
+                return
+            
             if room_id:
                 # 加入指定房间
                 room = await self.room_manager.get_room(room_id)
                 if not room:
                     yield event.plain_result(f"❌ 房间 {room_id} 不存在")
                     return
-                
-                success = await self.room_manager.join_room(user_id, room_id)
-                if success:
+                    
+                result = await self.room_manager.join_room(room_id, user_id)
+                if result:
                     yield event.plain_result(f"✅ 成功加入房间 {room_id}")
+                    room_status = self.ui_builder.build_room_status(room)
+                    yield event.plain_result(room_status)
                 else:
-                    yield event.plain_result(f"❌ 加入房间 {room_id} 失败")
+                    yield event.plain_result("❌ 加入房间失败，房间可能已满或游戏进行中")
             else:
                 # 快速匹配
-                available_rooms = await self.room_manager.get_available_rooms()
-                if available_rooms:
-                    room = available_rooms[0]  # 选择第一个可用房间
-                    success = await self.room_manager.join_room(user_id, room.room_id)
-                    if success:
-                        yield event.plain_result(f"✅ 快速匹配成功，加入房间 {room.room_id}")
-                    else:
-                        yield event.plain_result("❌ 快速匹配失败")
+                room = await self.room_manager.quick_match(user_id)
+                if room:
+                    yield event.plain_result(f"✅ 已匹配到房间 {room.room_id}")
+                    room_status = self.ui_builder.build_room_status(room)
+                    yield event.plain_result(room_status)
                 else:
-                    yield event.plain_result("❌ 暂无可用房间，请使用 /poker_create 创建房间")
+                    yield event.plain_result("❌ 暂无可用房间，请稍后重试或创建新房间")
                     
         except Exception as e:
             async for result in self.handle_error(event, e, "加入房间"):
@@ -92,7 +98,7 @@ class GameCommandHandler(BaseCommandHandler):
     
     async def handle_leave_room(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
-        处理离开房间命令
+        处理离开房间命令（简化版本，避免竞态条件）
         
         Args:
             event: 消息事件对象
@@ -105,11 +111,13 @@ class GameCommandHandler(BaseCommandHandler):
                 yield event.plain_result("❌ 您当前不在任何房间中")
                 return
             
-            success = await self.room_manager.leave_room(current_room.room_id, user_id)
+            room_id = current_room.room_id
+            success = await self.room_manager.leave_room(room_id, user_id)
+            
             if success:
-                yield event.plain_result(f"✅ 成功离开房间 {current_room.room_id}")
+                yield event.plain_result("✅ 已成功离开游戏")
             else:
-                yield event.plain_result("❌ 离开房间失败")
+                yield event.plain_result("❌ 离开游戏失败，请重试")
                 
         except Exception as e:
             async for result in self.handle_error(event, e, "离开房间"):

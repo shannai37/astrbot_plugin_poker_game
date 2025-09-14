@@ -98,10 +98,9 @@ class TexasHoldemPlugin(Star):
     
     def _init_command_handlers(self):
         """
-        初始化命令处理器（新架构预览）
+        初始化命令处理器（现在正在使用）
         
-        注意：这是为了演示新架构而添加的，当前仍使用原有的命令处理方式。
-        未来可以逐步迁移命令到这些处理器中，实现职责分离。
+        将命令处理逻辑分离到专门的处理器中，实现职责分离。
         """
         try:
             from .handlers.game_handler import GameCommandHandler
@@ -111,16 +110,16 @@ class TexasHoldemPlugin(Star):
             self.game_handler = GameCommandHandler(self)
             self.admin_handler = AdminCommandHandler(self)
             
-            # 获取命令映射（供未来使用）
-            self.game_commands = self.game_handler.get_command_handlers()
-            self.admin_commands = self.admin_handler.get_command_handlers()
-            
             logger.info("命令处理器初始化完成")
             
         except ImportError as e:
             logger.warning(f"命令处理器导入失败: {e}")
+            self.game_handler = None
+            self.admin_handler = None
         except Exception as e:
             logger.error(f"命令处理器初始化失败: {e}")
+            self.game_handler = None
+            self.admin_handler = None
 
     async def initialize_plugin(self):
         """
@@ -459,301 +458,76 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result(f"❌ 查看游戏状态失败: {str(e)}")
 
     @filter.command("poker_join")
-    @handle_plugin_exception("加入房间")
     async def join_room(self, event: AstrMessageEvent, room_id: str = ""):
-        """
-        加入指定房间或快速匹配
-        
-        Args:
-            event: 消息事件对象
-            room_id: 房间ID，为空时快速匹配
-        """
-        user_id = event.get_sender_id()
-        
-        # 确保玩家已注册
-        player = await self.player_manager.get_or_create_player(user_id)
-        
-        # 检查玩家是否被封禁
-        if player.is_banned:
-            if player.ban_until > 0:
-                # 临时封禁，显示剩余时间
-                remaining_time = player.ban_until - time.time()
-                if remaining_time > 0:
-                    remaining_hours = remaining_time / 3600
-                    yield event.plain_result(f"❌ 您已被封禁，剩余时间: {remaining_hours:.1f}小时\n原因: {player.ban_reason}")
-                    return
-            else:
-                # 永久封禁
-                yield event.plain_result(f"❌ 您已被永久封禁\n原因: {player.ban_reason}")
-                return
-        
-        # 检查玩家是否已在游戏中
-        current_room = await self.room_manager.get_player_room(user_id)
-        if current_room:
-            yield event.plain_result(f"❌ 您已在房间 {current_room.room_id} 中，请先离开当前游戏")
-            return
-        
-        # 检查积分是否足够
-        if player.chips <= 0:
-            yield event.plain_result("❌ 积分不足，无法加入游戏。请联系管理员充值。")
-            return
-        
-        if room_id:
-            # 加入指定房间
-            room = await self.room_manager.get_room(room_id)
-            if not room:
-                yield event.plain_result(f"❌ 房间 {room_id} 不存在")
-                return
-                
-            result = await self.room_manager.join_room(room_id, user_id)
-            if result:
-                yield event.plain_result(f"✅ 成功加入房间 {room_id}")
-                # 发送房间状态
-                room_status = self.ui_builder.build_room_status(room)
-                yield event.plain_result(room_status)
-            else:
-                yield event.plain_result("❌ 加入房间失败，房间可能已满或游戏进行中")
+        """加入指定房间或快速匹配（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_join_room(event, room_id):
+                yield result
         else:
-            # 快速匹配
-            room = await self.room_manager.quick_match(user_id)
-            if room:
-                yield event.plain_result(f"✅ 已匹配到房间 {room.room_id}")
-                room_status = self.ui_builder.build_room_status(room)
-                yield event.plain_result(room_status)
-            else:
-                yield event.plain_result("❌ 暂无可用房间，请稍后重试或创建新房间")
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_leave")
     async def leave_room(self, event: AstrMessageEvent):
-        """
-        离开当前房间 - 优化版本，快速响应
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            # 快速检查玩家是否在房间中
-            current_room = await self.room_manager.get_player_room(user_id)
-            if not current_room:
-                yield event.plain_result("❌ 您当前不在任何游戏中")
-                return
-            
-            # 立即清除玩家映射，避免重复请求
-            room_id = current_room.room_id
-            self.room_manager.player_room_mapping.pop(user_id, None)
-            
-            # 立即回复用户
-            yield event.plain_result("✅ 正在离开游戏...")
-            
-            # 异步处理复杂的离开逻辑
-            try:
-                result = await self.room_manager.leave_room(room_id, user_id)
-                if result:
-                    yield event.plain_result("✅ 已成功离开游戏")
-                else:
-                    # 如果失败，恢复映射
-                    self.room_manager.player_room_mapping[user_id] = room_id
-                    yield event.plain_result("❌ 离开游戏失败，请重试")
-            except Exception as leave_error:
-                # 如果出错，恢复映射
-                self.room_manager.player_room_mapping[user_id] = room_id
-                logger.error(f"离开房间处理失败: {leave_error}")
-                yield event.plain_result("❌ 离开游戏时出现错误，请重试")
-                
-        except Exception as e:
-            logger.error(f"离开房间失败: {e}")
-            yield event.plain_result(f"❌ 离开房间失败: {str(e)}")
+        """离开当前房间（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_leave_room(event):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_achievements")
     async def achievements_view(self, event: AstrMessageEvent):
-        """
-        查看成就进度
-        
-        Args:
-            event: 消息事件
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            # 获取成就进度数据
-            progress_data = await self.player_manager.get_achievement_progress(user_id)
-            
-            if not progress_data:
-                yield event.plain_result("❌ 无法获取成就数据")
-                return
-            
-            # 构建成就显示
-            player_name = await self._get_player_display_name(user_id)
-            result_text = self.ui_builder.build_achievements_list(progress_data, player_name)
-            
-            yield event.plain_result(result_text)
-            
-        except Exception as e:
-            logger.error(f"查看成就失败: {e}")
-            yield event.plain_result(f"❌ 查看成就失败: {str(e)}")
+        """查看成就进度（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_achievements(event):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
     
     @filter.command("poker_equip")
-    async def equip_achievement(self, event: AstrMessageEvent):
-        """
-        装备成就
-        
-        Args:
-            event: 消息事件
-        """
-        user_id = event.get_sender_id()
-        args = event.get_message_plain_text().split()[1:]
-        
-        if not args:
-            yield event.plain_result("❌ 请指定要装备的成就ID\n💡 使用 /poker_achievements 查看可装备的成就")
-            return
-        
-        achievement_id = args[0]
-        
-        try:
-            success, message = await self.player_manager.equip_achievement(user_id, achievement_id)
-            
-            if success:
-                yield event.plain_result(f"✅ {message}")
-            else:
-                yield event.plain_result(f"❌ {message}")
-                
-        except Exception as e:
-            logger.error(f"装备成就失败: {e}")
-            yield event.plain_result(f"❌ 装备成就失败: {str(e)}")
+    async def equip_achievement(self, event: AstrMessageEvent, achievement_id: str = ""):
+        """装备成就（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_equip_achievement(event, achievement_id or None):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_status")
     async def player_status(self, event: AstrMessageEvent):
-        """
-        查看玩家个人状态
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            player = await self.player_manager.get_or_create_player(user_id)
-            current_room = await self.room_manager.get_player_room(user_id)
-            
-            status_text = f"""👤 玩家状态
-
-💰 当前积分: {player.chips}
-🎯 等级: {player.level}
-📊 总局数: {player.total_games}
-🏆 胜率: {player.win_rate:.1f}%
-💹 总盈亏: {player.total_profit:+d}
-
-🎮 游戏状态: {'游戏中' if current_room else '空闲'}"""
-
-            if current_room:
-                status_text += f"\n🏠 当前房间: {current_room.room_id}"
-                
-            yield event.plain_result(status_text)
-            
-        except Exception as e:
-            logger.error(f"查看状态失败: {e}")
-            yield event.plain_result(f"❌ 查看状态失败: {str(e)}")
+        """查看玩家个人状态（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_player_status(event):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_stats")
     async def player_stats(self, event: AstrMessageEvent):
-        """
-        查看玩家详细统计
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            stats = await self.player_manager.get_player_stats(user_id)
-            if not stats:
-                yield event.plain_result("❌ 暂无统计数据")
-                return
-                
-            stats_text = self.ui_builder.build_player_stats(stats)
-            yield event.plain_result(stats_text)
-            
-        except Exception as e:
-            logger.error(f"查看统计失败: {e}")
-            yield event.plain_result(f"❌ 查看统计失败: {str(e)}")
+        """查看玩家详细统计（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_player_stats(event):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_rooms")
     async def list_rooms(self, event: AstrMessageEvent):
-        """
-        查看所有可用房间
-        
-        Args:
-            event: 消息事件对象
-        """
-        try:
-            rooms = await self.room_manager.get_available_rooms()
-            if not rooms:
-                yield event.plain_result("🏠 当前没有可用房间\n\n使用 /poker create 创建新房间")
-                return
-                
-            rooms_text = self.ui_builder.build_rooms_list(rooms)
-            yield event.plain_result(rooms_text)
-            
-        except Exception as e:
-            logger.error(f"查看房间列表失败: {e}")
-            yield event.plain_result(f"❌ 查看房间列表失败: {str(e)}")
+        """查看所有可用房间（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_rooms_list(event):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_create")
-    @handle_plugin_exception("创建房间")
     async def create_room(self, event: AstrMessageEvent, blind_level: int = 1):
-        """
-        创建新房间
-        
-        Args:
-            event: 消息事件对象
-            blind_level: 盲注级别索引
-        """
-        user_id = event.get_sender_id()
-        
-        # 检查玩家是否被封禁
-        player = await self.player_manager.get_or_create_player(user_id)
-        if player.is_banned:
-            if player.ban_until > 0:
-                # 临时封禁，显示剩余时间
-                remaining_time = player.ban_until - time.time()
-                if remaining_time > 0:
-                    remaining_hours = remaining_time / 3600
-                    yield event.plain_result(f"❌ 您已被封禁，剩余时间: {remaining_hours:.1f}小时\n原因: {player.ban_reason}")
-                    return
-            else:
-                # 永久封禁
-                yield event.plain_result(f"❌ 您已被永久封禁\n原因: {player.ban_reason}")
-                return
-        
-        # 验证盲注级别
-        if blind_level < 1 or blind_level > len(self.plugin_config["blind_levels"]):
-            yield event.plain_result(f"❌ 盲注级别错误，请选择 1-{len(self.plugin_config['blind_levels'])}")
-            return
-        
-        # 检查玩家是否已在游戏中
-        current_room = await self.room_manager.get_player_room(user_id)
-        if current_room:
-            yield event.plain_result("❌ 您已在游戏中，请先离开当前游戏")
-            return
-        
-        # 创建房间
-        blind_amount = self.plugin_config["blind_levels"][blind_level - 1]
-        room = await self.room_manager.create_room(
-            creator_id=user_id,
-            small_blind=blind_amount,
-            big_blind=blind_amount * 2,
-            max_players=self.plugin_config["max_players"]
-        )
-        
-        if room:
-            yield event.plain_result(f"✅ 房间创建成功！房间号: {room.room_id}")
-            # 显示房间状态（创建者已自动加入）
-            room_status = self.ui_builder.build_room_status(room)
-            yield event.plain_result(room_status)
+        """创建新房间（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_create_room(event, blind_level):
+                yield result
         else:
-            yield event.plain_result("❌ 房间创建失败")
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_start")
     async def start_game(self, event: AstrMessageEvent):
@@ -833,280 +607,49 @@ class TexasHoldemPlugin(Star):
     # ==================== 游戏中操作 ====================
     
     @filter.command("poker_call")
-    @handle_plugin_exception("跟注操作")
     async def game_call(self, event: AstrMessageEvent):
-        """
-        跟注操作
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        # 获取玩家所在房间
-        room = await self.room_manager.get_player_room(user_id)
-        if not room or not room.game:
-            yield event.plain_result("❌ 您当前不在任何游戏中")
-            return
-        
-        # 检查是否轮到该玩家
-        current_player = room.game.current_player_id
-        if current_player != user_id:
-            # 获取详细的游戏状态用于诊断
-            game_state = room.game.get_game_state()
-            active_players = [pid for pid in room.game.player_order if room.game.players[pid].can_act()]
-            in_hand_players = [pid for pid in room.game.player_order if room.game.players[pid].is_in_hand()]
-            
-            debug_info = f"""❌ 还没轮到您行动
-👤 当前行动玩家: {current_player}
-🎯 您的ID: {user_id}
-👥 活跃玩家列表: {', '.join([pid[:8] for pid in active_players])}
-🃏 在牌局中: {', '.join([pid[:8] for pid in in_hand_players])}
-🎮 游戏阶段: {game_state.get('phase', 'unknown')}
-🔄 玩家顺序: {', '.join([pid[:8] for pid in room.game.player_order])}
-
-💡 请等待轮到您时再进行操作
-
-🐛 调试信息:
-• 您在活跃列表中: {user_id in active_players}
-• 您在牌局中: {user_id in in_hand_players}
-• 您的状态: {game_state.get('players', {}).get(user_id, {}).get('status', 'unknown')}"""
-            
-            yield event.plain_result(debug_info)
-            return
-        
-        # 执行跟注操作
-        if await room.game.handle_player_action(user_id, PlayerAction.CALL):
-            yield event.plain_result("✅ 跟注成功")
-            
-            # 发送游戏状态更新（群消息）
-            game_status = self.ui_builder.build_game_status(room.game)
-            yield event.plain_result(game_status)
-            
-            # 检查游戏是否结束
-            if room.game.is_game_over():
-                await self._handle_game_end(room)
+        """跟注操作（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_game_call(event):
+                yield result
         else:
-            # 获取详细的游戏状态用于诊断
-            game_state = room.game.get_game_state()
-            player_info = game_state['players'].get(user_id, {})
-            
-            current_bet = game_state.get('current_bet', 0)
-            player_current_bet = player_info.get('current_bet', 0)
-            player_chips = player_info.get('chips', 0)
-            call_amount = current_bet - player_current_bet
-            
-            debug_info = f"""❌ 无法跟注，游戏状态诊断：
-💰 当前最高下注: {current_bet}
-🎯 您的当前下注: {player_current_bet}
-💳 您的筹码: {player_chips}
-💵 需要跟注金额: {call_amount}
-
-💡 跟注条件：需要跟注金额 > 0 且您有足够筹码"""
-            
-            yield event.plain_result(debug_info)
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_raise")
-    @handle_plugin_exception("加注操作")
     async def game_raise(self, event: AstrMessageEvent, amount: int = None):
-        """
-        加注操作
-        
-        Args:
-            event: 消息事件对象
-            amount: 加注金额
-        """
-        user_id = event.get_sender_id()
-        
-        # 检查是否提供了加注金额
-        if amount is None:
-            yield event.plain_result("❌ 请指定加注金额\n💡 使用格式: /poker_raise [金额]")
-            return
-        
-        room = await self.room_manager.get_player_room(user_id)
-        if not room or not room.game:
-            yield event.plain_result("❌ 您当前不在任何游戏中")
-            return
-        
-        # 检查是否轮到该玩家
-        if room.game.current_player_id != user_id:
-            yield event.plain_result(f"❌ 还没轮到您，当前行动玩家: {room.game.current_player_id}")
-            return
-        
-        if await room.game.handle_player_action(user_id, PlayerAction.RAISE, amount):
-            yield event.plain_result(f"✅ 加注 {amount} 成功")
-            
-            game_status = self.ui_builder.build_game_status(room.game)
-            yield event.plain_result(game_status)
-            
-            if room.game.is_game_over():
-                await self._handle_game_end(room)
+        """加注操作（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_game_raise(event, amount):
+                yield result
         else:
-            # 获取详细的游戏状态用于诊断
-            game_state = room.game.get_game_state()
-            player_info = game_state['players'].get(user_id, {})
-            
-            current_bet = game_state.get('current_bet', 0)
-            player_current_bet = player_info.get('current_bet', 0)
-            player_chips = player_info.get('chips', 0)
-            player_status = player_info.get('status', 'unknown')
-            game_phase = game_state.get('phase', 'unknown')
-            
-            # 计算加注需要的金额
-            call_amount = current_bet - player_current_bet
-            total_needed = call_amount + amount
-            min_raise = room.game.big_blind
-            
-            debug_info = f"""❌ 无法加注，游戏状态诊断：
-🎮 游戏阶段: {game_phase}
-💰 当前最高下注: {current_bet}
-🎯 您的当前下注: {player_current_bet}
-💳 您的筹码: {player_chips}
-📊 玩家状态: {player_status}
-
-💵 加注分析:
-• 需要跟注金额: {call_amount}
-• 您的加注金额: {amount}
-• 总计需要金额: {total_needed}
-• 最小加注要求: {min_raise}
-
-💡 加注条件检查:
-✓ 加注金额 > 0: {amount > 0}
-✓ 总需要金额 <= 筹码: {total_needed} <= {player_chips} = {total_needed <= player_chips}
-✓ 加注金额 >= 最小要求: {amount} >= {min_raise} = {amount >= min_raise}"""
-            
-            yield event.plain_result(debug_info)
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_fold")
     async def game_fold(self, event: AstrMessageEvent):
-        """
-        弃牌操作
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            room = await self.room_manager.get_player_room(user_id)
-            if not room or not room.game:
-                yield event.plain_result("❌ 您当前不在任何游戏中")
-                return
-            
-            # 检查是否轮到该玩家
-            if room.game.current_player_id != user_id:
-                yield event.plain_result(f"❌ 还没轮到您，当前行动玩家: {room.game.current_player_id}")
-                return
-            
-            if await room.game.handle_player_action(user_id, PlayerAction.FOLD):
-                yield event.plain_result("✅ 弃牌成功")
-                
-                game_status = self.ui_builder.build_game_status(room.game)
-                yield event.plain_result(game_status)
-                
-                if room.game.is_game_over():
-                    await self._handle_game_end(room)
-            else:
-                yield event.plain_result("❌ 无法弃牌，请检查游戏状态")
-                
-        except Exception as e:
-            logger.error(f"弃牌操作失败: {e}")
-            yield event.plain_result(f"❌ 弃牌失败: {str(e)}")
+        """弃牌操作（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_game_fold(event):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_check")
     async def game_check(self, event: AstrMessageEvent):
-        """
-        过牌操作
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            room = await self.room_manager.get_player_room(user_id)
-            if not room or not room.game:
-                yield event.plain_result("❌ 您当前不在任何游戏中")
-                return
-            
-            # 检查是否轮到该玩家
-            current_player = room.game.current_player_id
-            if current_player != user_id:
-                yield event.plain_result(f"❌ 还没轮到您，当前行动玩家: {current_player}")
-                return
-            
-            # 获取详细的游戏状态用于诊断
-            game_state = room.game.get_game_state()
-            player_info = game_state['players'].get(user_id, {})
-            
-            # 检查过牌是否有效
-            if await room.game.handle_player_action(user_id, PlayerAction.CHECK):
-                yield event.plain_result("✅ 过牌成功")
-                
-                game_status = self.ui_builder.build_game_status(room.game)
-                yield event.plain_result(game_status)
-                
-                if room.game.is_game_over():
-                    await self._handle_game_end(room)
-            else:
-                # 提供详细的诊断信息
-                current_bet = game_state.get('current_bet', 0)
-                player_current_bet = player_info.get('current_bet', 0)
-                player_chips = player_info.get('chips', 0)
-                player_status = player_info.get('status', 'unknown')
-                game_phase = game_state.get('phase', 'unknown')
-                
-                debug_info = f"""❌ 无法过牌，游戏状态诊断：
-🎮 游戏阶段: {game_phase}
-💰 当前最高下注: {current_bet}
-🎯 您的当前下注: {player_current_bet}
-💳 您的筹码: {player_chips}
-📊 玩家状态: {player_status}
-👤 当前行动玩家: {current_player}
-
-💡 过牌条件：您的当前下注({player_current_bet}) 需要 >= 当前最高下注({current_bet})"""
-                
-                yield event.plain_result(debug_info)
-                
-        except Exception as e:
-            logger.error(f"过牌操作失败: {e}")
-            yield event.plain_result(f"❌ 过牌失败: {str(e)}")
+        """过牌操作（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_game_check(event):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_allin")
     async def game_allin(self, event: AstrMessageEvent):
-        """
-        全押操作
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            room = await self.room_manager.get_player_room(user_id)
-            if not room or not room.game:
-                yield event.plain_result("❌ 您当前不在任何游戏中")
-                return
-            
-            # 检查是否轮到该玩家
-            if room.game.current_player_id != user_id:
-                yield event.plain_result(f"❌ 还没轮到您，当前行动玩家: {room.game.current_player_id}")
-                return
-            
-            if await room.game.handle_player_action(user_id, PlayerAction.ALL_IN):
-                yield event.plain_result("✅ 全押成功")
-                
-                game_status = self.ui_builder.build_game_status(room.game)
-                yield event.plain_result(game_status)
-                
-                if room.game.is_game_over():
-                    await self._handle_game_end(room)
-            else:
-                yield event.plain_result("❌ 无法全押，请检查游戏状态")
-                
-        except Exception as e:
-            logger.error(f"全押操作失败: {e}")
-            yield event.plain_result(f"❌ 全押失败: {str(e)}")
+        """全押操作（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_game_allin(event):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
 
     # ==================== 辅助方法 ====================
@@ -1751,113 +1294,175 @@ class TexasHoldemPlugin(Star):
 
     async def _handle_game_end(self, room):
         """
-        处理游戏结束
+        处理游戏结束（重构版本：分解为多个小方法）
         
         Args:
             room: 房间对象
         """
         try:
-            if room.game and room.game.is_game_over():
-                # 获取游戏结果
-                results = room.game.get_game_results()
-                
-                # 更新每个玩家的统计数据
-                for player_id, result in results.items():
-                    profit = result.get('profit', 0)
-                    won = result.get('won', False)
-                    hand_evaluation = result.get('hand_evaluation')
-                    
-                    # 只更新玩家统计，不更新筹码（游戏引擎已经正确分配了筹码）
-                    await self.player_manager.update_game_result(
-                        player_id, profit, won, hand_evaluation
-                    )
-                    
-                    # 获取玩家当前筹码（包括成就奖励等）
-                    player = await self.player_manager.get_or_create_player(player_id)
-                    
-                    # 更新结果中的最终筹码为实际筹码（包括成就奖励）
-                    results[player_id]['final_chips'] = player.chips
-                
-                # 构建结果显示（包含手牌信息）
-                result_text = "🎉 游戏结束！\n\n"
-                result_text += "🏆 游戏结果:\n"
-                
-                # 按盈利排序显示结果
-                sorted_results = sorted(results.items(), key=lambda x: x[1].get('profit', 0), reverse=True)
-                
-                for player_id, result in sorted_results:
-                    profit = result.get('profit', 0)
-                    won = result.get('won', False)
-                    hand_cards = result.get('hand_cards', [])
-                    hand_evaluation = result.get('hand_evaluation')
-                    
-                    # 结果图标
-                    icon = "🏆" if won else "💸"
-                    profit_str = f"+{profit}" if profit > 0 else str(profit)
-                    
-                    # 显示玩家结果和手牌
-                    player_name = player_id[:8]
-                    result_line = f"{icon} {player_name}: {profit_str} 筹码"
-                    
-                    # 添加手牌信息
-                    if hand_cards:
-                        cards_str = " ".join(hand_cards)
-                        result_line += f"\n   🎴 手牌: {cards_str}"
-                        
-                        # 如果有手牌评估，显示牌型
-                        if hand_evaluation and won:
-                            hand_rank = hand_evaluation.hand_rank.name_cn
-                            result_line += f" ({hand_rank})"
-                    
-                    result_text += result_line + "\n"
-                
-                # 显示公共牌
-                community_cards = room.game.get_community_cards()
-                if community_cards:
-                    result_text += f"\n🎴 公共牌: {' '.join(community_cards)}\n"
-                
-                # 强制保存所有玩家数据到数据库，确保统计准确
-                try:
-                    await self.player_manager.save_all_players()
-                    logger.info("玩家数据已强制保存到数据库")
-                except Exception as e:
-                    logger.error(f"强制保存玩家数据失败: {e}")
-                
-                # 保存游戏记录到数据库
-                try:
-                    winners = [pid for pid, result in results.items() if result.get('won', False)]
-                    winner_id = winners[0] if winners else None
-                    
-                    game_record = {
-                        'players': list(results.keys()),
-                        'winner_id': winner_id,
-                        'game_duration': 0,  # TODO: 可以添加游戏时长统计
-                        'final_pot': room.game.get_total_pot(),
-                        'hand_results': {
-                            pid: {
-                                'profit': result.get('profit', 0),
-                                'won': result.get('won', False),
-                                'hand_cards': result.get('hand_cards', []),
-                                'hand_rank': result.get('hand_evaluation').hand_rank.name_cn if result.get('hand_evaluation') else None
-                            }
-                            for pid, result in results.items()
-                        }
-                    }
-                    
-                    await self.database_manager.save_game_record(room.room_id, game_record)
-                    logger.info(f"游戏记录已保存到数据库: 房间 {room.room_id}")
-                    
-                except Exception as e:
-                    logger.error(f"保存游戏记录失败: {e}")
-                
-                # 记录到日志并等待群消息功能实现
-                logger.info(f"房间 {room.room_id} 游戏结束结果:\n{result_text}")
-                
-                # 自动清理房间和玩家映射
-                await self._auto_cleanup_room(room)
+            if not (room.game and room.game.is_game_over()):
+                return
+            
+            # 获取游戏结果
+            results = room.game.get_game_results()
+            
+            # 更新玩家统计数据
+            await self._update_player_stats_on_game_end(results)
+            
+            # 构建并发送结果消息
+            result_text = await self._build_game_end_message(room, results)
+            
+            # 持久化游戏数据
+            await self._persist_game_results(room, results)
+            
+            # 记录到日志
+            logger.info(f"房间 {room.room_id} 游戏结束结果:\n{result_text}")
+            
+            # 重置房间状态
+            await self._auto_cleanup_room(room)
                 
         except Exception as e:
-            logger.error(f"处理游戏结束失败: {e}")
+            logger.error(f"游戏结束处理失败: {e}")
+            # 强制重置房间，避免卡死
+            await self._auto_cleanup_room(room)
+    
+    async def _update_player_stats_on_game_end(self, results: dict):
+        """
+        游戏结束时更新玩家统计数据
+        
+        Args:
+            results: 游戏结果字典
+        """
+        for player_id, result in results.items():
+            try:
+                profit = result.get('profit', 0)
+                won = result.get('won', False)
+                hand_evaluation = result.get('hand_evaluation')
+                
+                # 只更新玩家统计，不更新筹码（游戏引擎已经正确分配了筹码）
+                await self.player_manager.update_game_result(
+                    player_id, profit, won, hand_evaluation
+                )
+                
+                # 获取玩家当前筹码（包括成就奖励等）
+                player = await self.player_manager.get_or_create_player(player_id)
+                
+                # 更新结果中的最终筹码为实际筹码（包括成就奖励）
+                results[player_id]['final_chips'] = player.chips
+                
+            except Exception as e:
+                logger.error(f"更新玩家 {player_id} 统计数据失败: {e}")
+    
+    async def _build_game_end_message(self, room, results: dict) -> str:
+        """
+        构建游戏结束消息
+        
+        Args:
+            room: 房间对象
+            results: 游戏结果字典
+            
+        Returns:
+            str: 格式化的游戏结束消息
+        """
+        try:
+            result_text = "🎉 游戏结束！\n\n"
+            result_text += "🏆 游戏结果:\n"
+            
+            # 按盈利排序显示结果
+            sorted_results = sorted(results.items(), key=lambda x: x[1].get('profit', 0), reverse=True)
+            
+            for player_id, result in sorted_results:
+                profit = result.get('profit', 0)
+                won = result.get('won', False)
+                hand_cards = result.get('hand_cards', [])
+                hand_evaluation = result.get('hand_evaluation')
+                
+                # 结果图标
+                icon = "🏆" if won else "💸"
+                profit_str = f"+{profit}" if profit > 0 else str(profit)
+                
+                # 显示玩家结果和手牌
+                player_name = player_id[:8]
+                result_line = f"{icon} {player_name}: {profit_str} 筹码"
+                
+                # 添加手牌信息
+                if hand_cards:
+                    cards_str = " ".join(hand_cards)
+                    result_line += f"\n   🎴 手牌: {cards_str}"
+                    
+                    # 如果有手牌评估，显示牌型
+                    if hand_evaluation and won:
+                        hand_rank = hand_evaluation.hand_rank.name_cn
+                        result_line += f" ({hand_rank})"
+                
+                result_text += result_line + "\n"
+            
+            # 显示公共牌
+            community_cards = room.game.get_community_cards()
+            if community_cards:
+                result_text += f"\n🎴 公共牌: {' '.join(community_cards)}\n"
+            
+            return result_text
+            
+        except Exception as e:
+            logger.error(f"构建游戏结束消息失败: {e}")
+            return "🎉 游戏结束！（消息构建失败）"
+    
+    async def _persist_game_results(self, room, results: dict):
+        """
+        持久化游戏结果数据
+        
+        Args:
+            room: 房间对象
+            results: 游戏结果字典
+        """
+        # 保存玩家数据
+        await self._save_player_data_on_game_end()
+        
+        # 保存游戏记录
+        await self._save_game_record(room, results)
+    
+    async def _save_player_data_on_game_end(self):
+        """保存游戏结束时的玩家数据"""
+        try:
+            await self.player_manager.save_all_players()
+            logger.info("玩家数据已强制保存到数据库")
+        except Exception as e:
+            logger.error(f"强制保存玩家数据失败: {e}")
+    
+    async def _save_game_record(self, room, results: dict):
+        """
+        保存游戏记录到数据库
+        
+        Args:
+            room: 房间对象
+            results: 游戏结果字典
+        """
+        try:
+            winners = [pid for pid, result in results.items() if result.get('won', False)]
+            winner_id = winners[0] if winners else None
+            
+            game_record = {
+                'players': list(results.keys()),
+                'winner_id': winner_id,
+                'game_duration': 0,  # TODO: 可以添加游戏时长统计
+                'final_pot': room.game.get_total_pot(),
+                'hand_results': {
+                    pid: {
+                        'profit': result.get('profit', 0),
+                        'won': result.get('won', False),
+                        'hand_cards': result.get('hand_cards', []),
+                        'hand_rank': result.get('hand_evaluation').hand_rank.name_cn if result.get('hand_evaluation') else None
+                    }
+                    for pid, result in results.items()
+                }
+            }
+            
+            await self.database_manager.save_game_record(room.room_id, game_record)
+            logger.info(f"游戏记录已保存到数据库: 房间 {room.room_id}")
+            
+        except Exception as e:
+            logger.error(f"保存游戏记录失败: {e}")
 
     async def _auto_cleanup_room(self, room):
         """
