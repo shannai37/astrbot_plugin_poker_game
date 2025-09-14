@@ -1573,9 +1573,11 @@ class TexasHoldemPlugin(Star):
             from pathlib import Path
             import datetime
             
-            # 生成备份文件名
+            # 生成备份文件名（使用插件数据目录）
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = Path(f"data/backups/texas_holdem_backup_{timestamp}.db")
+            backup_dir = self.get_data_dir() / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_path = backup_dir / f"texas_holdem_backup_{timestamp}.db"
             
             # 先保存所有数据
             await self.player_manager.save_all_players()

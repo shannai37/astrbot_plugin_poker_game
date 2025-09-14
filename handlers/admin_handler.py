@@ -1,4 +1,5 @@
 from typing import Dict, AsyncGenerator
+import time
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api import logger
 from .base_handler import BaseCommandHandler
@@ -37,36 +38,6 @@ class AdminCommandHandler(BaseCommandHandler):
             'poker_admin_config': self.handle_admin_config,
         }
     
-    def _is_admin(self, user_id: str) -> bool:
-        """
-        检查用户是否为管理员
-        
-        Args:
-            user_id: 用户ID
-            
-        Returns:
-            bool: 是否为管理员
-        """
-        # 这里应该实现管理员权限检查逻辑
-        # 可以通过配置文件、数据库或其他方式管理管理员列表
-        admin_list = self.plugin_config.get('admin_users', [])
-        return user_id in admin_list
-    
-    async def require_admin_permission(self, event: AstrMessageEvent) -> bool:
-        """
-        检查并要求管理员权限
-        
-        Args:
-            event: 消息事件对象
-            
-        Returns:
-            bool: 是否有管理员权限
-        """
-        user_id = event.get_sender_id()
-        if not self._is_admin(user_id):
-            yield event.plain_result("❌ 此功能仅限管理员使用")
-            return False
-        return True
     
     async def handle_admin_panel(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
@@ -75,8 +46,6 @@ class AdminCommandHandler(BaseCommandHandler):
         Args:
             event: 消息事件对象
         """
-        if not await self.require_admin_permission(event):
-            return
         
         try:
             # 获取系统统计
@@ -101,8 +70,6 @@ class AdminCommandHandler(BaseCommandHandler):
             duration: 封禁时长（小时）
             reason: 封禁原因
         """
-        if not await self.require_admin_permission(event):
-            return
         
         try:
             # 使用插件中已有的玩家ID解析方法
@@ -138,8 +105,6 @@ class AdminCommandHandler(BaseCommandHandler):
         Args:
             event: 消息事件对象
         """
-        if not await self.require_admin_permission(event):
-            return
         
         try:
             # 获取详细统计信息
@@ -156,7 +121,8 @@ class AdminCommandHandler(BaseCommandHandler):
             lines.append(f"  🟢 活跃玩家(7天): {system_stats.get('active_players', 0)}")
             lines.append(f"  🎲 总游戏局数: {system_stats.get('total_games', 0)}")
             lines.append(f"  💰 流通筹码总量: {system_stats.get('total_chips', 0):,}")
-            lines.append(f"  📅 运行时间: {self.ui_builder.format_time(self.plugin.start_time)}")
+            runtime_seconds = time.time() - self.plugin.start_time
+            lines.append(f"  📅 运行时间: {self.ui_builder.format_time(runtime_seconds)}")
             lines.append("")
             
             # 房间统计

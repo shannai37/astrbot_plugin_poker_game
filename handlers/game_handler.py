@@ -105,7 +105,7 @@ class GameCommandHandler(BaseCommandHandler):
                 yield event.plain_result("❌ 您当前不在任何房间中")
                 return
             
-            success = await self.room_manager.leave_room(user_id)
+            success = await self.room_manager.leave_room(current_room.room_id, user_id)
             if success:
                 yield event.plain_result(f"✅ 成功离开房间 {current_room.room_id}")
             else:

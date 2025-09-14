@@ -153,6 +153,7 @@ class TexasHoldemGame:
         self.current_player_index = 0
         self.current_player_id: Optional[str] = None
         self.last_raise_player_id: Optional[str] = None
+        self.last_raise_amount: int = 0  # 上一次的加注额度，用于计算最小再加注
         self.current_bet = 0  # 当前轮次的最高下注
         
         # 牌和底池
@@ -427,6 +428,7 @@ class TexasHoldemGame:
         self.current_player_index = start_index
         self.current_player_id = self.active_players[self.current_player_index]
         self.last_raise_player_id = None
+        self.last_raise_amount = 0
         
         logger.info(f"✅ 行动顺序设置: 当前玩家={self.current_player_id[:8]} (完整ID: {self.current_player_id})")
         logger.info(f"   游戏阶段: {self.game_phase.value}, 索引: {start_index}/{len(self.active_players)}")
@@ -608,7 +610,11 @@ class TexasHoldemGame:
         player.current_bet += bet_amount
         player.total_bet += bet_amount
         player.last_action = PlayerAction.RAISE
+        
+        # 记录这次加注的金额（用于计算下次最小加注）
+        previous_highest = self.current_bet
         self.current_bet = player.current_bet
+        self.last_raise_amount = self.current_bet - previous_highest
         self.last_raise_player_id = player_id
         self.main_pot += bet_amount
     
@@ -625,7 +631,9 @@ class TexasHoldemGame:
         
         # 如果全押金额超过当前最高下注，视为加注
         if player.current_bet > self.current_bet:
+            previous_highest = self.current_bet
             self.current_bet = player.current_bet
+            self.last_raise_amount = self.current_bet - previous_highest
             self.last_raise_player_id = player_id
         
         self.main_pot += bet_amount
@@ -786,6 +794,7 @@ class TexasHoldemGame:
             player.last_action = None  # 重置行动状态，每个阶段都需要重新行动
         self.current_bet = 0
         self.last_raise_player_id = None  # 重置加注玩家
+        self.last_raise_amount = 0  # 重置加注金额
         
         logger.info(f"   切换前当前玩家: {old_current_player[:8]}")
         
@@ -1082,14 +1091,12 @@ class TexasHoldemGame:
                 return False
             
             # 检查最小加注要求
-            # 最小加注应该至少是大盲注，如果已有人加注，则至少要等于上一次加注的金额
-            min_raise = self.big_blind
+            # 根据德州扑克标准规则：最小加注额应该至少等于上一次的加注额
+            min_raise = self.big_blind  # 默认最小加注为大盲注
             
-            # 如果已经有人加注过，计算最小再加注金额
-            if self.current_bet > self.big_blind:
-                # 找出上一次的加注额（当前最高下注 - 之前的最高下注）
-                # 这里简化为大盲注，实际游戏中应该记录上一次加注金额
-                min_raise = self.big_blind
+            # 如果本轮已经有人加注过，最小再加注金额应该等于或大于上一次的加注额
+            if self.last_raise_amount > 0:
+                min_raise = max(self.big_blind, self.last_raise_amount)
             
             if amount < min_raise:
                 return False
