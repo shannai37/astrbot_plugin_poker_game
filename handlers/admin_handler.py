@@ -91,6 +91,15 @@ class AdminCommandHandler(BaseCommandHandler):
             success = await self.player_manager.ban_player(resolved_player_id, duration, reason)
             if success:
                 yield event.plain_result(f"✅ 已封禁玩家 {player.display_name} {duration}小时\n原因: {reason}")
+                
+                # 检查玩家是否在房间中，如果是则将其踢出
+                current_room = await self.room_manager.get_player_room(resolved_player_id)
+                if current_room:
+                    leave_success = await self.room_manager.leave_room(current_room.room_id, resolved_player_id)
+                    if leave_success:
+                        yield event.plain_result(f"🏠 已将被封禁玩家从房间 {current_room.room_id[:8]} 中移除")
+                    else:
+                        yield event.plain_result(f"⚠️ 封禁成功但从房间移除失败")
             else:
                 yield event.plain_result(f"❌ 封禁操作失败")
                 
@@ -122,7 +131,7 @@ class AdminCommandHandler(BaseCommandHandler):
             lines.append(f"  🎲 总游戏局数: {system_stats.get('total_games', 0)}")
             lines.append(f"  💰 流通筹码总量: {system_stats.get('total_chips', 0):,}")
             runtime_seconds = time.time() - self.plugin.start_time
-            lines.append(f"  📅 运行时间: {self.ui_builder.format_time(runtime_seconds)}")
+            lines.append(f"  📅 运行时间: {self.ui_builder.format_duration(runtime_seconds)}")
             lines.append("")
             
             # 房间统计

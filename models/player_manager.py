@@ -1001,19 +1001,42 @@ class PlayerManager:
     
     async def save_all_players(self):
         """
-        保存所有玩家数据到数据库
+        保存所有玩家数据到数据库（优化版本：使用批量操作）
         """
         if not self.cache_dirty:
             return
         
         try:
+            # 收集所有需要保存的玩家数据
+            players_data = []
             for player in self.players.values():
-                await self._save_player_to_db(player)
+                players_data.append(player.to_dict())
             
-            self.cache_dirty = False
-            self.last_save_time = time.time()
+            if players_data:
+                # 使用批量保存操作
+                success = await self.database_manager.batch_save_players(players_data)
+                
+                if success:
+                    self.cache_dirty = False
+                    self.last_save_time = time.time()
+                    logger.info(f"批量保存 {len(players_data)} 个玩家数据完成")
+                else:
+                    logger.error("批量保存玩家数据失败")
+                    # 如果批量失败，尝试逐个保存（回退方案）
+                    logger.info("尝试逐个保存玩家数据...")
+                    successful_saves = 0
+                    for player in self.players.values():
+                        try:
+                            if await self.database_manager.save_player_data(player.player_id, player.to_dict()):
+                                successful_saves += 1
+                        except Exception as e:
+                            logger.error(f"保存玩家 {player.player_id} 数据失败: {e}")
+                    
+                    if successful_saves > 0:
+                        self.cache_dirty = False
+                        self.last_save_time = time.time()
+                        logger.info(f"逐个保存完成，成功保存 {successful_saves}/{len(self.players)} 个玩家")
             
-            logger.info("所有玩家数据已保存")
         except Exception as e:
             logger.error(f"批量保存玩家数据失败: {e}")
     

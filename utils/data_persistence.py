@@ -41,25 +41,33 @@ class DatabaseManager:
         # 表结构版本
         self.schema_version = 1
         
+        # 持久数据库连接
+        self.db_connection = None
+        self.connection_lock = asyncio.Lock()
+        
     async def initialize(self):
         """
         初始化数据库
         
-        创建必要的表结构
+        创建必要的表结构并建立持久连接
         """
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self.connection_lock:
+            # 创建持久连接
+            self.db_connection = await aiosqlite.connect(self.db_path)
+            
             # 设置数据库配置
-            await db.execute("PRAGMA foreign_keys = ON")
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA synchronous = NORMAL")
+            await self.db_connection.execute("PRAGMA foreign_keys = ON")
+            await self.db_connection.execute("PRAGMA journal_mode = WAL")
+            await self.db_connection.execute("PRAGMA synchronous = NORMAL")
+            await self.db_connection.execute("PRAGMA busy_timeout = 30000")  # 30秒超时
             
             # 创建表
-            await self._create_tables(db)
+            await self._create_tables(self.db_connection)
             
             # 检查和更新数据库版本
-            await self._check_schema_version(db)
+            await self._check_schema_version(self.db_connection)
             
-            await db.commit()
+            await self.db_connection.commit()
             
         logger.info(f"数据库初始化完成: {self.db_path}")
     
@@ -232,6 +240,55 @@ class DatabaseManager:
         await db.execute("UPDATE system_config SET config_value = ?, updated_at = ? WHERE config_key = 'schema_version'",
                         (str(to_version), time.time()))
     
+    # ==================== 连接管理 ====================
+    
+    async def _get_connection(self) -> aiosqlite.Connection:
+        """
+        获取持久数据库连接
+        
+        Returns:
+            aiosqlite.Connection: 数据库连接
+            
+        Raises:
+            RuntimeError: 如果连接未初始化
+        """
+        if not self.db_connection:
+            raise RuntimeError("数据库连接未初始化，请先调用 initialize() 方法")
+        return self.db_connection
+    
+    async def _execute_with_retry(self, operation, max_retries: int = 3):
+        """
+        带重试机制的数据库操作
+        
+        Args:
+            operation: 数据库操作函数
+            max_retries: 最大重试次数
+            
+        Returns:
+            操作结果
+        """
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                async with self.connection_lock:
+                    db = await self._get_connection()
+                    return await operation(db)
+                    
+            except Exception as e:
+                last_error = e
+                logger.warning(f"数据库操作失败，尝试 {attempt + 1}/{max_retries}: {e}")
+                
+                # 如果是连接问题，尝试重新建立连接
+                if "database is locked" in str(e) or "no such table" in str(e):
+                    await asyncio.sleep(0.1 * (attempt + 1))  # 递增延迟
+                    continue
+                else:
+                    break
+        
+        # 如果所有重试都失败，抛出最后的错误
+        raise last_error
+    
     # ==================== 辅助方法 ====================
     
     def _row_to_player_dict(self, row) -> Dict[str, Any]:
@@ -268,6 +325,74 @@ class DatabaseManager:
 
     # ==================== 玩家数据操作 ====================
     
+    async def batch_save_players(self, players_data: List[Dict[str, Any]]) -> bool:
+        """
+        批量保存玩家数据，解决 N+1 问题
+        
+        Args:
+            players_data: 玩家数据列表
+            
+        Returns:
+            bool: 是否成功
+        """
+        if not players_data:
+            return True
+            
+        async def _batch_save_operation(db: aiosqlite.Connection) -> bool:
+            # 构建批量插入语句
+            sql = """
+                INSERT OR REPLACE INTO players (
+                    player_id, display_name, chips, level, experience,
+                    total_games, wins, losses, total_profit, best_hand,
+                    achievements, last_active, registration_time,
+                    daily_bonus_claimed, last_bonus_time, ban_status,
+                    ban_reason, ban_until, equipped_achievement, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            
+            # 准备批量数据
+            batch_data = []
+            current_time = time.time()
+            
+            for player_data in players_data:
+                achievements_json = json.dumps(player_data.get('achievements', []))
+                
+                batch_data.append((
+                    player_data.get('player_id'),
+                    player_data.get('display_name', ''),
+                    player_data.get('chips', 10000),
+                    player_data.get('level', 1),
+                    player_data.get('experience', 0),
+                    player_data.get('total_games', 0),
+                    player_data.get('wins', 0),
+                    player_data.get('losses', 0),
+                    player_data.get('total_profit', 0),
+                    player_data.get('best_hand'),
+                    achievements_json,
+                    player_data.get('last_active', current_time),
+                    player_data.get('registration_time', current_time),
+                    1 if player_data.get('daily_bonus_claimed', False) else 0,
+                    player_data.get('last_bonus_time', 0),
+                    1 if player_data.get('ban_status', False) else 0,
+                    player_data.get('ban_reason', ''),
+                    player_data.get('ban_until', 0),
+                    player_data.get('equipped_achievement', ''),
+                    current_time
+                ))
+            
+            # 执行批量插入
+            await db.executemany(sql, batch_data)
+            await db.commit()
+            
+            logger.info(f"批量保存 {len(batch_data)} 个玩家数据")
+            return True
+        
+        try:
+            return await self._execute_with_retry(_batch_save_operation)
+        except Exception as e:
+            logger.error(f"批量保存玩家数据失败: {e}")
+            return False
+    
     async def save_player_data(self, player_id: str, player_data: Dict[str, Any]) -> bool:
         """
         保存玩家数据
@@ -279,45 +404,46 @@ class DatabaseManager:
         Returns:
             bool: 是否成功
         """
+        async def _save_operation(db: aiosqlite.Connection) -> bool:
+            # 转换JSON字段
+            achievements_json = json.dumps(player_data.get('achievements', []))
+            
+            await db.execute("""
+                INSERT OR REPLACE INTO players (
+                    player_id, display_name, chips, level, experience,
+                    total_games, wins, losses, total_profit, best_hand,
+                    achievements, last_active, registration_time,
+                    daily_bonus_claimed, last_bonus_time, ban_status,
+                    ban_reason, ban_until, equipped_achievement, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                player_id,
+                player_data.get('display_name', ''),
+                player_data.get('chips', 10000),
+                player_data.get('level', 1),
+                player_data.get('experience', 0),
+                player_data.get('total_games', 0),
+                player_data.get('wins', 0),
+                player_data.get('losses', 0),
+                player_data.get('total_profit', 0),
+                player_data.get('best_hand'),
+                achievements_json,
+                player_data.get('last_active', time.time()),
+                player_data.get('registration_time', time.time()),
+                1 if player_data.get('daily_bonus_claimed', False) else 0,
+                player_data.get('last_bonus_time', 0),
+                1 if player_data.get('ban_status', False) else 0,
+                player_data.get('ban_reason', ''),
+                player_data.get('ban_until', 0),
+                player_data.get('equipped_achievement', ''),
+                time.time()
+            ))
+            
+            await db.commit()
+            return True
+        
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                # 转换JSON字段
-                achievements_json = json.dumps(player_data.get('achievements', []))
-                
-                await db.execute("""
-                    INSERT OR REPLACE INTO players (
-                        player_id, display_name, chips, level, experience,
-                        total_games, wins, losses, total_profit, best_hand,
-                        achievements, last_active, registration_time,
-                        daily_bonus_claimed, last_bonus_time, ban_status,
-                        ban_reason, ban_until, equipped_achievement, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    player_id,
-                    player_data.get('display_name', ''),
-                    player_data.get('chips', 10000),
-                    player_data.get('level', 1),
-                    player_data.get('experience', 0),
-                    player_data.get('total_games', 0),
-                    player_data.get('wins', 0),
-                    player_data.get('losses', 0),
-                    player_data.get('total_profit', 0),
-                    player_data.get('best_hand'),
-                    achievements_json,
-                    player_data.get('last_active', time.time()),
-                    player_data.get('registration_time', time.time()),
-                    1 if player_data.get('daily_bonus_claimed', False) else 0,
-                    player_data.get('last_bonus_time', 0),
-                    1 if player_data.get('ban_status', False) else 0,
-                    player_data.get('ban_reason', ''),
-                    player_data.get('ban_until', 0),
-                    player_data.get('equipped_achievement', ''),
-                    time.time()
-                ))
-                
-                await db.commit()
-                return True
-                
+            return await self._execute_with_retry(_save_operation)
         except Exception as e:
             logger.error(f"保存玩家数据失败 {player_id}: {e}")
             return False
@@ -332,24 +458,25 @@ class DatabaseManager:
         Returns:
             Optional[Dict]: 玩家数据字典
         """
+        async def _get_operation(db: aiosqlite.Connection) -> Optional[Dict[str, Any]]:
+            cursor = await db.execute("""
+                SELECT player_id, display_name, chips, level, experience,
+                       total_games, wins, losses, total_profit, best_hand,
+                       achievements, last_active, registration_time,
+                       daily_bonus_claimed, last_bonus_time, ban_status,
+                       ban_reason, ban_until, equipped_achievement
+                FROM players WHERE player_id = ?
+            """, (player_id,))
+            
+            row = await cursor.fetchone()
+            
+            if row:
+                return self._row_to_player_dict(row)
+            
+            return None
+        
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                cursor = await db.execute("""
-                    SELECT player_id, display_name, chips, level, experience,
-                           total_games, wins, losses, total_profit, best_hand,
-                           achievements, last_active, registration_time,
-                           daily_bonus_claimed, last_bonus_time, ban_status,
-                           ban_reason, ban_until, equipped_achievement
-                    FROM players WHERE player_id = ?
-                """, (player_id,))
-                
-                row = await cursor.fetchone()
-                
-                if row:
-                    return self._row_to_player_dict(row)
-                
-                return None
-                
+            return await self._execute_with_retry(_get_operation)
         except Exception as e:
             logger.error(f"获取玩家数据失败 {player_id}: {e}")
             return None
@@ -361,25 +488,26 @@ class DatabaseManager:
         Returns:
             List[Dict]: 玩家数据列表
         """
+        async def _load_operation(db: aiosqlite.Connection) -> List[Dict[str, Any]]:
+            cursor = await db.execute("""
+                SELECT player_id, display_name, chips, level, experience,
+                       total_games, wins, losses, total_profit, best_hand,
+                       achievements, last_active, registration_time,
+                       daily_bonus_claimed, last_bonus_time, ban_status,
+                       ban_reason, ban_until, equipped_achievement
+                FROM players
+            """)
+            
+            rows = await cursor.fetchall()
+            players = []
+            
+            for row in rows:
+                players.append(self._row_to_player_dict(row))
+            
+            return players
+        
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                cursor = await db.execute("""
-                    SELECT player_id, display_name, chips, level, experience,
-                           total_games, wins, losses, total_profit, best_hand,
-                           achievements, last_active, registration_time,
-                           daily_bonus_claimed, last_bonus_time, ban_status,
-                           ban_reason, ban_until, equipped_achievement
-                    FROM players
-                """)
-                
-                rows = await cursor.fetchall()
-                players = []
-                
-                for row in rows:
-                    players.append(self._row_to_player_dict(row))
-                
-                return players
-                
+            return await self._execute_with_retry(_load_operation)
         except Exception as e:
             logger.error(f"加载所有玩家数据失败: {e}")
             return []
@@ -621,56 +749,57 @@ class DatabaseManager:
         Returns:
             Dict: 统计信息
         """
+        async def _stats_operation(db: aiosqlite.Connection) -> Dict[str, Any]:
+            # 总玩家数
+            cursor = await db.execute("SELECT COUNT(*) FROM players")
+            total_players = (await cursor.fetchone())[0]
+            
+            # 活跃玩家数（最近7天）
+            week_ago = time.time() - 7 * 24 * 3600
+            cursor = await db.execute("SELECT COUNT(*) FROM players WHERE last_active > ?", (week_ago,))
+            active_players = (await cursor.fetchone())[0]
+            
+            # 总游戏局数
+            cursor = await db.execute("SELECT COUNT(*) FROM game_records")
+            total_games = (await cursor.fetchone())[0]
+            
+            # 总筹码流通
+            cursor = await db.execute("SELECT SUM(chips) FROM players WHERE chips > 0")
+            result = await cursor.fetchone()
+            total_chips = result[0] if result[0] else 0
+            
+            # 封禁玩家数（包括临时和永久封禁，但排除已过期的临时封禁）
+            current_time = time.time()
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM players 
+                WHERE ban_status = 1 
+                AND (ban_until = 0 OR ban_until > ?)
+            """, (current_time,))
+            banned_players = (await cursor.fetchone())[0]
+            
+            # 今日新增玩家数
+            today_start = current_time - (current_time % 86400)  # 今天开始的时间戳
+            cursor = await db.execute("SELECT COUNT(*) FROM players WHERE registration_time > ?", (today_start,))
+            today_new_players = (await cursor.fetchone())[0]
+            
+            # 总盈亏
+            cursor = await db.execute("SELECT SUM(total_profit) FROM players")
+            result = await cursor.fetchone()
+            total_profit = result[0] if result[0] else 0
+            
+            return {
+                'total_players': total_players,
+                'active_players': active_players,
+                'today_new_players': today_new_players,
+                'total_games': total_games,
+                'total_chips': total_chips,
+                'total_profit': total_profit,
+                'banned_players': banned_players,
+                'database_path': str(self.db_path)
+            }
+        
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                # 总玩家数
-                cursor = await db.execute("SELECT COUNT(*) FROM players")
-                total_players = (await cursor.fetchone())[0]
-                
-                # 活跃玩家数（最近7天）
-                week_ago = time.time() - 7 * 24 * 3600
-                cursor = await db.execute("SELECT COUNT(*) FROM players WHERE last_active > ?", (week_ago,))
-                active_players = (await cursor.fetchone())[0]
-                
-                # 总游戏局数
-                cursor = await db.execute("SELECT COUNT(*) FROM game_records")
-                total_games = (await cursor.fetchone())[0]
-                
-                # 总筹码流通
-                cursor = await db.execute("SELECT SUM(chips) FROM players WHERE chips > 0")
-                result = await cursor.fetchone()
-                total_chips = result[0] if result[0] else 0
-                
-                # 封禁玩家数（包括临时和永久封禁，但排除已过期的临时封禁）
-                current_time = time.time()
-                cursor = await db.execute("""
-                    SELECT COUNT(*) FROM players 
-                    WHERE ban_status = 1 
-                    AND (ban_until = 0 OR ban_until > ?)
-                """, (current_time,))
-                banned_players = (await cursor.fetchone())[0]
-                
-                # 今日新增玩家数
-                today_start = current_time - (current_time % 86400)  # 今天开始的时间戳
-                cursor = await db.execute("SELECT COUNT(*) FROM players WHERE registration_time > ?", (today_start,))
-                today_new_players = (await cursor.fetchone())[0]
-                
-                # 总盈亏
-                cursor = await db.execute("SELECT SUM(total_profit) FROM players")
-                result = await cursor.fetchone()
-                total_profit = result[0] if result[0] else 0
-                
-                return {
-                    'total_players': total_players,
-                    'active_players': active_players,
-                    'today_new_players': today_new_players,
-                    'total_games': total_games,
-                    'total_chips': total_chips,
-                    'total_profit': total_profit,
-                    'banned_players': banned_players,
-                    'database_path': str(self.db_path)
-                }
-                
+            return await self._execute_with_retry(_stats_operation)
         except Exception as e:
             logger.error(f"获取系统统计失败: {e}")
             return {
@@ -712,7 +841,15 @@ class DatabaseManager:
         """
         关闭数据库连接
         
-        注意：由于使用aiosqlite，每个操作都创建独立连接，
-        此方法主要用于清理和日志记录
+        关闭持久连接并清理资源
         """
-        logger.info("数据库管理器已关闭")
+        async with self.connection_lock:
+            if self.db_connection:
+                try:
+                    await self.db_connection.close()
+                    self.db_connection = None
+                    logger.info("数据库连接已关闭")
+                except Exception as e:
+                    logger.error(f"关闭数据库连接失败: {e}")
+            else:
+                logger.info("数据库管理器已关闭")

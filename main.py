@@ -6,12 +6,13 @@ from astrbot.core.utils.session_waiter import session_waiter, SessionController
 
 import asyncio
 import json
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, asdict
 from enum import Enum
 import random
 import time
 from pathlib import Path
+import functools
 
 # 导入自定义模块
 from .models.card_system import Card, CardSystem, HandRank
@@ -20,6 +21,29 @@ from .models.player_manager import PlayerManager, PlayerInfo
 from .models.room_manager import RoomManager, GameRoom, RoomStatus
 from .utils.data_persistence import DatabaseManager
 from .utils.ui_builder import GameUIBuilder
+
+
+def handle_plugin_exception(operation_name: str):
+    """
+    异常处理装饰器，用于包装命令处理函数
+    
+    Args:
+        operation_name: 操作名称，用于错误消息
+        
+    Returns:
+        装饰器函数
+    """
+    def decorator(func: Callable):
+        @functools.wraps(func)
+        async def wrapper(self, event, *args, **kwargs):
+            try:
+                async for result in func(self, event, *args, **kwargs):
+                    yield result
+            except Exception as e:
+                logger.error(f"{operation_name}失败: {e}")
+                yield event.plain_result(f"❌ {operation_name}失败: {str(e)}")
+        return wrapper
+    return decorator
 
 
 @register("texas_holdem", "山萘", "德州扑克游戏插件 - 支持多人游戏、积分系统、房间管理", "1.0.0")
@@ -435,6 +459,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result(f"❌ 查看游戏状态失败: {str(e)}")
 
     @filter.command("poker_join")
+    @handle_plugin_exception("加入房间")
     async def join_room(self, event: AstrMessageEvent, room_id: str = ""):
         """
         加入指定房间或快速匹配
@@ -445,63 +470,58 @@ class TexasHoldemPlugin(Star):
         """
         user_id = event.get_sender_id()
         
-        try:
-            # 确保玩家已注册
-            player = await self.player_manager.get_or_create_player(user_id)
-            
-            # 检查玩家是否被封禁
-            if player.is_banned:
-                if player.ban_until > 0:
-                    # 临时封禁，显示剩余时间
-                    remaining_time = player.ban_until - time.time()
-                    if remaining_time > 0:
-                        remaining_hours = remaining_time / 3600
-                        yield event.plain_result(f"❌ 您已被封禁，剩余时间: {remaining_hours:.1f}小时\n原因: {player.ban_reason}")
-                        return
-                else:
-                    # 永久封禁
-                    yield event.plain_result(f"❌ 您已被永久封禁\n原因: {player.ban_reason}")
+        # 确保玩家已注册
+        player = await self.player_manager.get_or_create_player(user_id)
+        
+        # 检查玩家是否被封禁
+        if player.is_banned:
+            if player.ban_until > 0:
+                # 临时封禁，显示剩余时间
+                remaining_time = player.ban_until - time.time()
+                if remaining_time > 0:
+                    remaining_hours = remaining_time / 3600
+                    yield event.plain_result(f"❌ 您已被封禁，剩余时间: {remaining_hours:.1f}小时\n原因: {player.ban_reason}")
                     return
-            
-            # 检查玩家是否已在游戏中
-            current_room = await self.room_manager.get_player_room(user_id)
-            if current_room:
-                yield event.plain_result(f"❌ 您已在房间 {current_room.room_id} 中，请先离开当前游戏")
-                return
-            
-            # 检查积分是否足够
-            if player.chips <= 0:
-                yield event.plain_result("❌ 积分不足，无法加入游戏。请联系管理员充值。")
-                return
-            
-            if room_id:
-                # 加入指定房间
-                room = await self.room_manager.get_room(room_id)
-                if not room:
-                    yield event.plain_result(f"❌ 房间 {room_id} 不存在")
-                    return
-                    
-                result = await self.room_manager.join_room(room_id, user_id)
-                if result:
-                    yield event.plain_result(f"✅ 成功加入房间 {room_id}")
-                    # 发送房间状态
-                    room_status = self.ui_builder.build_room_status(room)
-                    yield event.plain_result(room_status)
-                else:
-                    yield event.plain_result("❌ 加入房间失败，房间可能已满或游戏进行中")
             else:
-                # 快速匹配
-                room = await self.room_manager.quick_match(user_id)
-                if room:
-                    yield event.plain_result(f"✅ 已匹配到房间 {room.room_id}")
-                    room_status = self.ui_builder.build_room_status(room)
-                    yield event.plain_result(room_status)
-                else:
-                    yield event.plain_result("❌ 暂无可用房间，请稍后重试或创建新房间")
-                    
-        except Exception as e:
-            logger.error(f"加入房间失败: {e}")
-            yield event.plain_result(f"❌ 加入房间失败: {str(e)}")
+                # 永久封禁
+                yield event.plain_result(f"❌ 您已被永久封禁\n原因: {player.ban_reason}")
+                return
+        
+        # 检查玩家是否已在游戏中
+        current_room = await self.room_manager.get_player_room(user_id)
+        if current_room:
+            yield event.plain_result(f"❌ 您已在房间 {current_room.room_id} 中，请先离开当前游戏")
+            return
+        
+        # 检查积分是否足够
+        if player.chips <= 0:
+            yield event.plain_result("❌ 积分不足，无法加入游戏。请联系管理员充值。")
+            return
+        
+        if room_id:
+            # 加入指定房间
+            room = await self.room_manager.get_room(room_id)
+            if not room:
+                yield event.plain_result(f"❌ 房间 {room_id} 不存在")
+                return
+                
+            result = await self.room_manager.join_room(room_id, user_id)
+            if result:
+                yield event.plain_result(f"✅ 成功加入房间 {room_id}")
+                # 发送房间状态
+                room_status = self.ui_builder.build_room_status(room)
+                yield event.plain_result(room_status)
+            else:
+                yield event.plain_result("❌ 加入房间失败，房间可能已满或游戏进行中")
+        else:
+            # 快速匹配
+            room = await self.room_manager.quick_match(user_id)
+            if room:
+                yield event.plain_result(f"✅ 已匹配到房间 {room.room_id}")
+                room_status = self.ui_builder.build_room_status(room)
+                yield event.plain_result(room_status)
+            else:
+                yield event.plain_result("❌ 暂无可用房间，请稍后重试或创建新房间")
 
     @filter.command("poker_leave")
     async def leave_room(self, event: AstrMessageEvent):
@@ -681,6 +701,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result(f"❌ 查看房间列表失败: {str(e)}")
 
     @filter.command("poker_create")
+    @handle_plugin_exception("创建房间")
     async def create_room(self, event: AstrMessageEvent, blind_level: int = 1):
         """
         创建新房间
@@ -691,53 +712,48 @@ class TexasHoldemPlugin(Star):
         """
         user_id = event.get_sender_id()
         
-        try:
-            # 检查玩家是否被封禁
-            player = await self.player_manager.get_or_create_player(user_id)
-            if player.is_banned:
-                if player.ban_until > 0:
-                    # 临时封禁，显示剩余时间
-                    remaining_time = player.ban_until - time.time()
-                    if remaining_time > 0:
-                        remaining_hours = remaining_time / 3600
-                        yield event.plain_result(f"❌ 您已被封禁，剩余时间: {remaining_hours:.1f}小时\n原因: {player.ban_reason}")
-                        return
-                else:
-                    # 永久封禁
-                    yield event.plain_result(f"❌ 您已被永久封禁\n原因: {player.ban_reason}")
+        # 检查玩家是否被封禁
+        player = await self.player_manager.get_or_create_player(user_id)
+        if player.is_banned:
+            if player.ban_until > 0:
+                # 临时封禁，显示剩余时间
+                remaining_time = player.ban_until - time.time()
+                if remaining_time > 0:
+                    remaining_hours = remaining_time / 3600
+                    yield event.plain_result(f"❌ 您已被封禁，剩余时间: {remaining_hours:.1f}小时\n原因: {player.ban_reason}")
                     return
-            
-            # 验证盲注级别
-            if blind_level < 1 or blind_level > len(self.plugin_config["blind_levels"]):
-                yield event.plain_result(f"❌ 盲注级别错误，请选择 1-{len(self.plugin_config['blind_levels'])}")
-                return
-            
-            # 检查玩家是否已在游戏中
-            current_room = await self.room_manager.get_player_room(user_id)
-            if current_room:
-                yield event.plain_result("❌ 您已在游戏中，请先离开当前游戏")
-                return
-            
-            # 创建房间
-            blind_amount = self.plugin_config["blind_levels"][blind_level - 1]
-            room = await self.room_manager.create_room(
-                creator_id=user_id,
-                small_blind=blind_amount,
-                big_blind=blind_amount * 2,
-                max_players=self.plugin_config["max_players"]
-            )
-            
-            if room:
-                yield event.plain_result(f"✅ 房间创建成功！房间号: {room.room_id}")
-                # 显示房间状态（创建者已自动加入）
-                room_status = self.ui_builder.build_room_status(room)
-                yield event.plain_result(room_status)
             else:
-                yield event.plain_result("❌ 房间创建失败")
-                
-        except Exception as e:
-            logger.error(f"创建房间失败: {e}")
-            yield event.plain_result(f"❌ 创建房间失败: {str(e)}")
+                # 永久封禁
+                yield event.plain_result(f"❌ 您已被永久封禁\n原因: {player.ban_reason}")
+                return
+        
+        # 验证盲注级别
+        if blind_level < 1 or blind_level > len(self.plugin_config["blind_levels"]):
+            yield event.plain_result(f"❌ 盲注级别错误，请选择 1-{len(self.plugin_config['blind_levels'])}")
+            return
+        
+        # 检查玩家是否已在游戏中
+        current_room = await self.room_manager.get_player_room(user_id)
+        if current_room:
+            yield event.plain_result("❌ 您已在游戏中，请先离开当前游戏")
+            return
+        
+        # 创建房间
+        blind_amount = self.plugin_config["blind_levels"][blind_level - 1]
+        room = await self.room_manager.create_room(
+            creator_id=user_id,
+            small_blind=blind_amount,
+            big_blind=blind_amount * 2,
+            max_players=self.plugin_config["max_players"]
+        )
+        
+        if room:
+            yield event.plain_result(f"✅ 房间创建成功！房间号: {room.room_id}")
+            # 显示房间状态（创建者已自动加入）
+            room_status = self.ui_builder.build_room_status(room)
+            yield event.plain_result(room_status)
+        else:
+            yield event.plain_result("❌ 房间创建失败")
 
     @filter.command("poker_start")
     async def start_game(self, event: AstrMessageEvent):
@@ -817,6 +833,7 @@ class TexasHoldemPlugin(Star):
     # ==================== 游戏中操作 ====================
     
     @filter.command("poker_call")
+    @handle_plugin_exception("跟注操作")
     async def game_call(self, event: AstrMessageEvent):
         """
         跟注操作
@@ -826,22 +843,21 @@ class TexasHoldemPlugin(Star):
         """
         user_id = event.get_sender_id()
         
-        try:
-            # 获取玩家所在房间
-            room = await self.room_manager.get_player_room(user_id)
-            if not room or not room.game:
-                yield event.plain_result("❌ 您当前不在任何游戏中")
-                return
+        # 获取玩家所在房间
+        room = await self.room_manager.get_player_room(user_id)
+        if not room or not room.game:
+            yield event.plain_result("❌ 您当前不在任何游戏中")
+            return
+        
+        # 检查是否轮到该玩家
+        current_player = room.game.current_player_id
+        if current_player != user_id:
+            # 获取详细的游戏状态用于诊断
+            game_state = room.game.get_game_state()
+            active_players = [pid for pid in room.game.player_order if room.game.players[pid].can_act()]
+            in_hand_players = [pid for pid in room.game.player_order if room.game.players[pid].is_in_hand()]
             
-            # 检查是否轮到该玩家
-            current_player = room.game.current_player_id
-            if current_player != user_id:
-                # 获取详细的游戏状态用于诊断
-                game_state = room.game.get_game_state()
-                active_players = [pid for pid in room.game.player_order if room.game.players[pid].can_act()]
-                in_hand_players = [pid for pid in room.game.player_order if room.game.players[pid].is_in_hand()]
-                
-                debug_info = f"""❌ 还没轮到您行动
+            debug_info = f"""❌ 还没轮到您行动
 👤 当前行动玩家: {current_player}
 🎯 您的ID: {user_id}
 👥 活跃玩家列表: {', '.join([pid[:8] for pid in active_players])}
@@ -855,44 +871,40 @@ class TexasHoldemPlugin(Star):
 • 您在活跃列表中: {user_id in active_players}
 • 您在牌局中: {user_id in in_hand_players}
 • 您的状态: {game_state.get('players', {}).get(user_id, {}).get('status', 'unknown')}"""
-                
-                yield event.plain_result(debug_info)
-                return
             
-            # 执行跟注操作
-            if await room.game.handle_player_action(user_id, PlayerAction.CALL):
-                yield event.plain_result("✅ 跟注成功")
-                
-                # 发送游戏状态更新（群消息）
-                game_status = self.ui_builder.build_game_status(room.game)
-                yield event.plain_result(game_status)
-                
-                # 检查游戏是否结束
-                if room.game.is_game_over():
-                    await self._handle_game_end(room)
-            else:
-                # 获取详细的游戏状态用于诊断
-                game_state = room.game.get_game_state()
-                player_info = game_state['players'].get(user_id, {})
-                
-                current_bet = game_state.get('current_bet', 0)
-                player_current_bet = player_info.get('current_bet', 0)
-                player_chips = player_info.get('chips', 0)
-                call_amount = current_bet - player_current_bet
-                
-                debug_info = f"""❌ 无法跟注，游戏状态诊断：
+            yield event.plain_result(debug_info)
+            return
+        
+        # 执行跟注操作
+        if await room.game.handle_player_action(user_id, PlayerAction.CALL):
+            yield event.plain_result("✅ 跟注成功")
+            
+            # 发送游戏状态更新（群消息）
+            game_status = self.ui_builder.build_game_status(room.game)
+            yield event.plain_result(game_status)
+            
+            # 检查游戏是否结束
+            if room.game.is_game_over():
+                await self._handle_game_end(room)
+        else:
+            # 获取详细的游戏状态用于诊断
+            game_state = room.game.get_game_state()
+            player_info = game_state['players'].get(user_id, {})
+            
+            current_bet = game_state.get('current_bet', 0)
+            player_current_bet = player_info.get('current_bet', 0)
+            player_chips = player_info.get('chips', 0)
+            call_amount = current_bet - player_current_bet
+            
+            debug_info = f"""❌ 无法跟注，游戏状态诊断：
 💰 当前最高下注: {current_bet}
 🎯 您的当前下注: {player_current_bet}
 💳 您的筹码: {player_chips}
 💵 需要跟注金额: {call_amount}
 
 💡 跟注条件：需要跟注金额 > 0 且您有足够筹码"""
-                
-                yield event.plain_result(debug_info)
-                
-        except Exception as e:
-            logger.error(f"跟注操作失败: {e}")
-            yield event.plain_result(f"❌ 跟注失败: {str(e)}")
+            
+            yield event.plain_result(debug_info)
 
     @filter.command("poker_raise")
     async def game_raise(self, event: AstrMessageEvent, amount: int):
@@ -1529,7 +1541,7 @@ class TexasHoldemPlugin(Star):
             lines.append("🖥️ 系统状态:")
             lines.append(f"  💾 数据库: {system_stats.get('database_path', 'N/A')}")
             runtime_seconds = time.time() - self.start_time
-            lines.append(f"  📅 运行时间: {self.ui_builder.format_time(runtime_seconds)}")
+            lines.append(f"  📅 运行时间: {self.ui_builder.format_duration(runtime_seconds)}")
             lines.append("")
             
             # 玩家统计

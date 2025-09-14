@@ -759,7 +759,7 @@ class GameUIBuilder:
     
     def format_time(self, timestamp: float) -> str:
         """
-        格式化时间显示
+        格式化时间显示（用于时间戳）
         
         Args:
             timestamp: 时间戳
@@ -788,3 +788,37 @@ class GameUIBuilder:
         except Exception as e:
             logger.error(f"格式化时间失败: {e}")
             return "未知时间"
+    
+    def format_duration(self, seconds: float) -> str:
+        """
+        格式化持续时间显示（用于秒数）
+        
+        Args:
+            seconds: 持续时间（秒数）
+            
+        Returns:
+            str: 格式化的持续时间字符串
+        """
+        try:
+            total_seconds = int(seconds)
+            
+            days = total_seconds // 86400
+            hours = (total_seconds % 86400) // 3600
+            minutes = (total_seconds % 3600) // 60
+            remaining_seconds = total_seconds % 60
+            
+            parts = []
+            if days > 0:
+                parts.append(f"{days}天")
+            if hours > 0:
+                parts.append(f"{hours}小时")
+            if minutes > 0:
+                parts.append(f"{minutes}分钟")
+            if remaining_seconds > 0 or not parts:
+                parts.append(f"{remaining_seconds}秒")
+            
+            return "".join(parts)
+                
+        except Exception as e:
+            logger.error(f"格式化持续时间失败: {e}")
+            return "未知时长"
