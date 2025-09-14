@@ -30,6 +30,7 @@ class GameCommandHandler(BaseCommandHandler):
             'poker_stats': self.handle_player_stats,
             'poker_rooms': self.handle_rooms_list,
             'poker_create': self.handle_create_room,
+            'poker_start': self.handle_start_game,
             'poker_call': self.handle_game_call,
             'poker_raise': self.handle_game_raise,
             'poker_fold': self.handle_game_fold,
@@ -37,6 +38,8 @@ class GameCommandHandler(BaseCommandHandler):
             'poker_allin': self.handle_game_allin,
             'poker_achievements': self.handle_achievements,
             'poker_equip': self.handle_equip_achievement,
+            'poker_debug': self.handle_game_debug,
+            'poker_emergency_exit': self.handle_emergency_exit,
         }
     
     async def handle_join_room(self, event: AstrMessageEvent, room_id: str = "") -> AsyncGenerator:

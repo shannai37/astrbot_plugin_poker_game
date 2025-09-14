@@ -6,7 +6,7 @@ from astrbot.core.utils.session_waiter import session_waiter, SessionController
 
 import asyncio
 import json
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
 import random
@@ -358,45 +358,12 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_exit")
     async def emergency_exit(self, event: AstrMessageEvent):
-        """
-        退出游戏并返回筹码
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            room = await self.room_manager.get_player_room(user_id)
-            if not room or not room.game:
-                yield event.plain_result("❌ 您当前不在任何游戏中")
-                return
-            
-            game = room.game
-            
-            # 计算每个玩家应该返回的筹码
-            total_refunded = 0
-            for player_id, player in game.players.items():
-                refund_amount = player.total_bet
-                if refund_amount > 0:
-                    player.chips += refund_amount
-                    total_refunded += refund_amount
-                    await self.player_manager.update_player_chips(player_id, player.chips)
-            
-            # 清空底池并结束游戏
-            game.main_pot = 0
-            game.side_pots.clear()
-            from .models.game_engine import GamePhase
-            game.game_phase = GamePhase.GAME_OVER
-            
-            yield event.plain_result(f"✅ 游戏已退出，返回筹码 {total_refunded}")
-            
-            # 清理房间
-            await self._auto_cleanup_room(room)
-            
-        except Exception as e:
-            logger.error(f"退出游戏失败: {e}")
-            yield event.plain_result(f"❌ 退出失败: {str(e)}")
+        """退出游戏并返回筹码（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_emergency_exit(event):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_game_status")
     async def game_status(self, event: AstrMessageEvent):
@@ -1250,16 +1217,6 @@ class TexasHoldemPlugin(Star):
             logger.error(f"aiocqhttp私聊发送失败: {e}")
             return False
     
-    # 未来可以添加其他平台的私聊处理方法
-    # async def _send_private_message_telegram(self, event: AstrMessageEvent, user_id: str, message: str) -> bool:
-    #     """Telegram平台私聊发送"""
-    #     # TODO: 实现Telegram私聊发送逻辑
-    #     return False
-    # 
-    # async def _send_private_message_discord(self, event: AstrMessageEvent, user_id: str, message: str) -> bool:
-    #     """Discord平台私聊发送"""  
-    #     # TODO: 实现Discord私聊发送逻辑
-    #     return False
     
     async def _send_private_cards(self, event: AstrMessageEvent, user_id: str, game):
         """
@@ -1445,7 +1402,7 @@ class TexasHoldemPlugin(Star):
             game_record = {
                 'players': list(results.keys()),
                 'winner_id': winner_id,
-                'game_duration': 0,  # TODO: 可以添加游戏时长统计
+                'game_duration': 0,
                 'final_pot': room.game.get_total_pot(),
                 'hand_results': {
                     pid: {

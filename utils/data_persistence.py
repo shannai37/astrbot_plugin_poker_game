@@ -312,7 +312,7 @@ class DatabaseManager:
             'losses': row[7],
             'total_profit': row[8],
             'best_hand': row[9],
-            'achievements': json.loads(row[10]) if row[10] else [],
+            'achievements': self._safe_json_loads(row[10], []),
             'last_active': row[11],
             'registration_time': row[12],
             'daily_bonus_claimed': bool(row[13]),
@@ -322,6 +322,31 @@ class DatabaseManager:
             'ban_until': row[17],
             'equipped_achievement': row[18]
         }
+    
+    def _safe_json_loads(self, json_str: str, default_value):
+        """
+        安全的JSON反序列化
+        
+        Args:
+            json_str: JSON字符串
+            default_value: 默认值
+            
+        Returns:
+            反序列化后的对象或默认值
+        """
+        if not json_str:
+            return default_value
+        
+        try:
+            result = json.loads(json_str)
+            # 类型检查：确保返回值类型与默认值类型一致
+            if type(result) != type(default_value):
+                logger.warning(f"JSON反序列化类型不匹配，期望 {type(default_value)}，实际 {type(result)}")
+                return default_value
+            return result
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"JSON反序列化失败: {e}, 使用默认值: {default_value}")
+            return default_value
 
     # ==================== 玩家数据操作 ====================
     
@@ -581,10 +606,19 @@ class DatabaseManager:
             row = await cursor.fetchone()
             
             if row:
+                # 安全的JSON反序列化
+                hand_type_wins = {}
+                position_stats = {}
+                recent_games = []
+                
+                hand_type_wins = self._safe_json_loads(row[0], {})
+                position_stats = self._safe_json_loads(row[1], {})
+                recent_games = self._safe_json_loads(row[2], [])
+                
                 return {
-                    'hand_type_wins': json.loads(row[0]) if row[0] else {},
-                    'position_stats': json.loads(row[1]) if row[1] else {},
-                    'recent_games': json.loads(row[2]) if row[2] else [],
+                    'hand_type_wins': hand_type_wins,
+                    'position_stats': position_stats,
+                    'recent_games': recent_games,
                     'longest_winning_streak': row[3],
                     'longest_losing_streak': row[4],
                     'current_streak': row[5],

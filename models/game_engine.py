@@ -152,6 +152,9 @@ class TexasHoldemGame:
         # 游戏进行状态
         self.current_player_index = 0
         self.current_player_id: Optional[str] = None
+        
+        # 阶段状态管理（初始化为None，避免动态属性问题）
+        self._last_phase_starter: Optional[str] = None
         self.last_raise_player_id: Optional[str] = None
         self.last_raise_amount: int = 0  # 上一次的加注额度，用于计算最小再加注
         self.current_bet = 0  # 当前轮次的最高下注
@@ -257,9 +260,8 @@ class TexasHoldemGame:
         self.action_history.clear()
         self.game_results.clear()
         
-        # 重置阶段先手记录，让玩家轮流先手
-        if hasattr(self, '_last_phase_starter'):
-            delattr(self, '_last_phase_starter')
+        # 重置阶段先手记录（使用None而不是动态删除属性）
+        self._last_phase_starter = None
         
         # 重置玩家状态
         for player in self.players.values():
@@ -406,7 +408,7 @@ class TexasHoldemGame:
         else:
             # 其他阶段：为了更好的游戏体验，让玩家轮流先手
             # 而不是总是小盲注先行动（修改标准规则）
-            if hasattr(self, '_last_phase_starter'):
+            if self._last_phase_starter is not None:
                 # 找到上次先手的玩家，这次让下一个玩家先手
                 try:
                     last_starter_index = self.active_players.index(self._last_phase_starter)
@@ -757,10 +759,6 @@ class TexasHoldemGame:
         
         # 启动新的超时计时器
         self._start_action_timeout()
-    
-    # 已废弃：_auto_fix_turn_state() 方法
-    # 这个方法会干扰正常的游戏流程，已被移除
-    # 现在轮转逻辑完全由 _set_action_order() 和 _move_to_next_player() 管理
     
     def _advance_to_next_phase(self):
         """进入下一个游戏阶段"""

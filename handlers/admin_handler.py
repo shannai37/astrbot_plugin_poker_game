@@ -73,7 +73,7 @@ class AdminCommandHandler(BaseCommandHandler):
         
         try:
             # 使用插件中已有的玩家ID解析方法
-            resolved_player_id, error_msg = await self.plugin._resolve_player_id(player_id)
+            resolved_player_id, error_msg = await self._resolve_player_id(player_id)
             if error_msg:
                 yield event.plain_result(error_msg)
                 return
