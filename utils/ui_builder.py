@@ -213,7 +213,7 @@ class GameUIBuilder:
             # 房间基本信息
             lines.append(f"🏠 房间信息")
             lines.append("=" * 30)
-            lines.append(f"🆔 房间号: {room.room_id}")
+            lines.append(f"🆔 房间号: {room.room_id[:8]}")
             lines.append(f"📝 房间名: {room.room_name}")
             lines.append(f"📊 状态: {self._get_room_status_name(room.status)}")
             lines.append(f"👥 玩家: {room.current_players}/{room.max_players}")
@@ -565,6 +565,7 @@ class GameUIBuilder:
             lines.append("  /poker_admin_players - 查看玩家列表")
             lines.append("  /poker_admin_ban [用户] [时长] [原因] - 封禁玩家")
             lines.append("  /poker_admin_unban [用户] - 解封玩家")
+            lines.append("  /poker_admin_banned [页数] - 查看封禁玩家列表")
             lines.append("  /poker_admin_addchips [用户] [数量] - 增加筹码")
             lines.append("  /poker_admin_backup - 备份数据")
             lines.append("  /poker_admin_stats - 详细统计")

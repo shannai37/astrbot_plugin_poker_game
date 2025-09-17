@@ -36,13 +36,14 @@ class PlayerInfo:
     """
     player_id: str
     display_name: str = ""
-    chips: int = 10000
+    chips: int = 3000
     level: int = 1
     experience: int = 0
     total_games: int = 0
     wins: int = 0
     losses: int = 0
     total_profit: int = 0
+    largest_win: int = 0  # 单局最大赢取
     best_hand: Optional[str] = None
     achievements: List[str] = field(default_factory=list)
     last_active: float = field(default_factory=time.time)
@@ -53,6 +54,17 @@ class PlayerInfo:
     ban_reason: str = ""
     ban_until: float = 0
     equipped_achievement: str = ""  # 装备的成就ID
+    
+    def __post_init__(self):
+        """初始化后处理，设置属性别名"""
+        # 设置成就系统所需的属性别名
+        self.games_played = self.total_games
+        self.games_won = self.wins
+        self.total_winnings = max(0, self.total_profit)  # 只显示正盈利作为总赢取
+        
+        # 确保 largest_win 不为空
+        if not hasattr(self, 'largest_win'):
+            self.largest_win = 0
     
     # 统计属性（计算得出）
     @property
@@ -152,7 +164,7 @@ class PlayerInfo:
         return cls(
             player_id=data['player_id'],
             display_name=data.get('display_name', ''),
-            chips=data.get('chips', 10000),
+            chips=data.get('chips', 1000),
             level=data.get('level', 1),
             experience=data.get('experience', 0),
             total_games=data.get('total_games', 0),
@@ -223,13 +235,21 @@ class PlayerManager:
         # 自动保存任务
         self.auto_save_task: Optional[asyncio.Task] = None
         
+        # 自动解封检查任务
+        self.auto_unban_task: Optional[asyncio.Task] = None
+        self.auto_unban_interval = 60  # 每分钟检查一次
+        
     def start_auto_save(self):
         """
-        启动自动保存任务
+        启动自动保存任务和自动解封检查任务
         """
         if not self.auto_save_task or self.auto_save_task.done():
             self.auto_save_task = asyncio.create_task(self.auto_save_task_loop())
             logger.info("自动保存任务已启动")
+        
+        if not self.auto_unban_task or self.auto_unban_task.done():
+            self.auto_unban_task = asyncio.create_task(self.auto_unban_task_loop())
+            logger.info("自动解封检查任务已启动")
     
     def _init_achievements(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -454,6 +474,18 @@ class PlayerManager:
             }
         }
     
+    async def get_player(self, player_id: str) -> Optional[PlayerInfo]:
+        """
+        获取现有玩家信息（不创建新玩家）
+        
+        Args:
+            player_id: 玩家ID
+            
+        Returns:
+            PlayerInfo: 玩家信息对象，如果不存在则返回None
+        """
+        return self.players.get(player_id)
+
     async def get_or_create_player(self, player_id: str, display_name: str = "") -> PlayerInfo:
         """
         获取或创建玩家
@@ -765,10 +797,23 @@ class PlayerManager:
             'locked': []
         }
         
+        # 先检查并解锁所有满足条件的成就
+        await self._check_achievements(stats)
+        
         for achievement_id, config in self.achievements_config.items():
             is_unlocked = achievement_id in stats.player_info.achievements
             current_progress = config["progress"](stats)
             target = config["target"]
+            
+            # 检查是否应该被解锁但还没有解锁
+            if not is_unlocked and config["condition"](stats):
+                # 立即解锁
+                stats.player_info.achievements.append(achievement_id)
+                is_unlocked = True
+                logger.info(f"实时解锁成就: {config['name']} for 玩家 {stats.player_info.player_id}")
+                
+                # 发放奖励
+                await self.add_chips(stats.player_info.player_id, config["reward"], f"成就奖励: {config['name']}")
             
             achievement_info = {
                 'id': achievement_id,
@@ -777,9 +822,10 @@ class PlayerManager:
                 'icon': config["icon"],
                 'category': config["category"],
                 'reward': config["reward"],
-                'progress': current_progress,
+                'current_progress': current_progress,
                 'target': target,
-                'progress_percent': min(100, (current_progress / target) * 100)
+                'progress_percent': min(100, (current_progress / target) * 100),
+                'is_unlocked': is_unlocked
             }
             
             if is_unlocked:
@@ -883,7 +929,7 @@ class PlayerManager:
             return False
         
         player = self.players[player_id]
-        current_chips = player.chips if keep_chips else 10000
+        current_chips = player.chips if keep_chips else 3000
         
         # 重置数据
         reset_player = PlayerInfo(
@@ -1145,10 +1191,54 @@ class PlayerManager:
             except Exception as e:
                 logger.error(f"自动保存任务错误: {e}")
     
+    async def auto_unban_task_loop(self):
+        """
+        自动解封检查任务循环
+        """
+        while True:
+            try:
+                await asyncio.sleep(self.auto_unban_interval)
+                await self.check_and_unban_expired_players()
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"自动解封检查任务错误: {e}")
+    
+    async def check_and_unban_expired_players(self):
+        """
+        检查并解封到期的玩家
+        """
+        current_time = time.time()
+        unbanned_players = []
+        
+        for player_id, player in self.players.items():
+            # 检查是否是被封禁且有到期时间的玩家
+            if player.ban_status and player.ban_until > 0 and current_time >= player.ban_until:
+                # 自动解封
+                player.ban_status = False
+                player.ban_reason = ""
+                player.ban_until = 0
+                self.cache_dirty = True
+                
+                unbanned_players.append(player)
+                logger.info(f"自动解封玩家: {player_id} ({player.display_name})")
+        
+        if unbanned_players:
+            # 这里可以添加通告功能，比如向管理员发送消息
+            # 由于需要访问主插件实例来发送消息，这里先记录日志
+            player_names = [p.display_name or p.player_id[-8:] for p in unbanned_players]
+            logger.info(f"系统自动解封 {len(unbanned_players)} 名玩家: {', '.join(player_names)}")
+            
+            # 保存更新
+            await self.save_all_players()
+    
     async def cleanup(self):
         """
         清理资源
         """
         if self.auto_save_task and not self.auto_save_task.done():
             self.auto_save_task.cancel()
+        if self.auto_unban_task and not self.auto_unban_task.done():
+            self.auto_unban_task.cancel()
         await self.save_all_players()

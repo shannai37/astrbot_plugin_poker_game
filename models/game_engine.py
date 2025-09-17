@@ -56,6 +56,7 @@ class GamePlayer:
     """
     player_id: str
     chips: int
+    display_name: str = ""
     hole_cards: List[Card] = field(default_factory=list)
     current_bet: int = 0
     total_bet: int = 0
@@ -66,6 +67,11 @@ class GamePlayer:
     is_big_blind: bool = False
     last_action: Optional[PlayerAction] = None
     last_action_time: float = field(default_factory=time.time)
+    
+    def __post_init__(self):
+        """初始化后处理"""
+        if not self.display_name:
+            self.display_name = f"Player_{self.player_id[-8:]}"
     
     def reset_for_new_hand(self):
         """
@@ -170,16 +176,19 @@ class TexasHoldemGame:
         self.game_results: Dict[str, Dict[str, Any]] = {}
         
         # 超时设置
-        self.action_timeout = 30  # 30秒操作超时
+        self.action_timeout = 120  # 120秒操作超时（2分钟）
+        self.warning_timeout = 90   # 90秒发出警告（还有30秒）
         self.timeout_task: Optional[asyncio.Task] = None
+        self.warning_task: Optional[asyncio.Task] = None
     
-    def add_player(self, player_id: str, chips: int) -> bool:
+    def add_player(self, player_id: str, chips: int, display_name: str = "") -> bool:
         """
         添加玩家到游戏中
         
         Args:
             player_id: 玩家ID
             chips: 玩家筹码数
+            display_name: 玩家显示名称
             
         Returns:
             bool: 是否成功添加
@@ -195,6 +204,7 @@ class TexasHoldemGame:
         
         player = GamePlayer(
             player_id=player_id,
+            display_name=display_name or f"Player_{player_id[-8:]}",
             chips=chips,
             position=position
         )
@@ -482,6 +492,8 @@ class TexasHoldemGame:
         # 取消超时计时器
         if self.timeout_task:
             self.timeout_task.cancel()
+        if self.warning_task:
+            self.warning_task.cancel()
         
         # 执行操作
         if action == PlayerAction.FOLD:
@@ -935,25 +947,89 @@ class TexasHoldemGame:
     
     def _start_action_timeout(self):
         """启动操作超时计时器"""
+        # 取消之前的任务
         if self.timeout_task:
             self.timeout_task.cancel()
+        if self.warning_task:
+            self.warning_task.cancel()
         
-        async def timeout_handler():
+        # 警告处理器 - 增强提醒功能
+        async def warning_handler():
             try:
-                await asyncio.sleep(self.action_timeout)
-                # 超时自动弃牌
-                if self.current_player_id:
-                    await self.handle_player_action(self.current_player_id, PlayerAction.FOLD)
+                await asyncio.sleep(self.warning_timeout)
+                # 发出超时警告
+                if self.current_player_id and self.game_phase not in [GamePhase.WAITING, GamePhase.GAME_OVER]:
+                    current_player = self.players.get(self.current_player_id)
+                    if current_player:
+                        warning_msg = f"⏰ 玩家 {current_player.display_name} 即将超时！还有30秒时间操作，否则将自动弃牌"
+                        logger.warning(warning_msg)
+                        # 可以考虑在handler中监听这类事件并发送到群聊
             except asyncio.CancelledError:
                 pass
         
+        # 超时处理器 - 删除过牌逻辑，直接弃牌并特殊结算
+        async def timeout_handler():
+            try:
+                await asyncio.sleep(self.action_timeout)
+                if self.current_player_id and self.game_phase not in [GamePhase.WAITING, GamePhase.GAME_OVER]:
+                    current_player = self.players.get(self.current_player_id)
+                    if current_player and current_player.status == PlayerStatus.ACTIVE:
+                        logger.warning(f"⏰ 玩家 {current_player.display_name} 超时，自动弃牌")
+                        
+                        # 直接弃牌（删除过牌逻辑）
+                        await self.handle_player_action(self.current_player_id, PlayerAction.FOLD)
+                        
+                        # 检查是否需要特殊结算（超时导致游戏结束）
+                        active_players = [p for p in self.players.values() if p.is_in_hand()]
+                        if len(active_players) <= 1:
+                            await self._handle_timeout_game_end()
+            except asyncio.CancelledError:
+                pass
+        
+        # 启动任务
+        self.warning_task = asyncio.create_task(warning_handler())
         self.timeout_task = asyncio.create_task(timeout_handler())
+    
+    async def _handle_timeout_game_end(self):
+        """处理超时导致的游戏结束 - 返还所有筹码"""
+        try:
+            logger.info("超时导致游戏结束，开始返还筹码流程")
+            
+            # 将所有下注返还给玩家
+            for player in self.players.values():
+                if player.current_bet > 0:
+                    player.chips += player.current_bet
+                    logger.info(f"返还玩家 {player.display_name} 筹码: {player.current_bet}")
+                    player.current_bet = 0
+            
+            # 清空底池
+            self.main_pot = 0
+            
+            # 设置游戏结束状态
+            self.game_phase = GamePhase.GAME_OVER
+            
+            # 生成超时结算结果（所有人收支为0）
+            self.game_results = {}
+            for player_id, player in self.players.items():
+                self.game_results[player_id] = {
+                    'profit': 0,
+                    'final_chips': player.chips,
+                    'hand_description': '超时结算，筹码返还',
+                    'reason': 'timeout'
+                }
+            
+            logger.info("超时游戏结束，所有筹码已返还")
+            
+        except Exception as e:
+            logger.error(f"处理超时游戏结束时发生错误: {e}")
     
     def _end_game(self):
         """结束游戏"""
         self.game_phase = GamePhase.GAME_OVER
         if self.timeout_task:
             self.timeout_task.cancel()
+        if self.warning_task:
+            self.warning_task.cancel()
     
     # ==================== 查询方法 ====================
     

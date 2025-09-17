@@ -51,25 +51,61 @@ class DatabaseManager:
         
         创建必要的表结构并建立持久连接
         """
-        async with self.connection_lock:
-            # 创建持久连接
-            self.db_connection = await aiosqlite.connect(self.db_path)
+        try:
+            logger.info(f"🔧 开始初始化数据库: {self.db_path}")
             
-            # 设置数据库配置
-            await self.db_connection.execute("PRAGMA foreign_keys = ON")
-            await self.db_connection.execute("PRAGMA journal_mode = WAL")
-            await self.db_connection.execute("PRAGMA synchronous = NORMAL")
-            await self.db_connection.execute("PRAGMA busy_timeout = 30000")  # 30秒超时
+            async with self.connection_lock:
+                # 创建持久连接
+                logger.info("📡 正在建立数据库连接...")
+                self.db_connection = await aiosqlite.connect(str(self.db_path))
+                self.db_connection.row_factory = aiosqlite.Row
+                logger.info("✅ 数据库连接已建立")
+                
+                # 设置数据库配置
+                logger.info("⚙️ 配置数据库参数...")
+                await self.db_connection.execute("PRAGMA foreign_keys = ON")
+                await self.db_connection.execute("PRAGMA journal_mode = WAL")
+                await self.db_connection.execute("PRAGMA synchronous = NORMAL")
+                await self.db_connection.execute("PRAGMA busy_timeout = 30000")  # 30秒超时
+                logger.info("✅ 数据库参数配置完成")
+                
+                # 创建表
+                logger.info("🏗️ 创建数据表...")
+                await self._create_tables(self.db_connection)
+                logger.info("✅ 数据表创建完成")
+                
+                # 检查和更新数据库版本
+                logger.info("🔍 检查数据库版本...")
+                await self._check_schema_version(self.db_connection)
+                logger.info("✅ 数据库版本检查完成")
+                
+                await self.db_connection.commit()
+                logger.info("💾 数据库事务提交完成")
+                
+            # 验证连接状态
+            if self.db_connection:
+                logger.info("✅ 数据库连接验证成功")
+            else:
+                raise Exception("数据库连接为空")
+                
+            logger.info(f"🎉 数据库初始化完成: {self.db_path}")
             
-            # 创建表
-            await self._create_tables(self.db_connection)
+        except Exception as e:
+            logger.error(f"💥 数据库初始化失败: {e}")
+            logger.error(f"数据库路径: {self.db_path}")
             
-            # 检查和更新数据库版本
-            await self._check_schema_version(self.db_connection)
+            import traceback
+            logger.error("完整错误栈:")
+            logger.error(traceback.format_exc())
             
-            await self.db_connection.commit()
-            
-        logger.info(f"数据库初始化完成: {self.db_path}")
+            if self.db_connection:
+                try:
+                    await self.db_connection.close()
+                    logger.info("🧹 数据库连接已关闭")
+                except:
+                    pass
+                self.db_connection = None
+            raise
     
     async def _create_tables(self, db: aiosqlite.Connection):
         """
@@ -244,16 +280,60 @@ class DatabaseManager:
     
     async def _get_connection(self) -> aiosqlite.Connection:
         """
-        获取持久数据库连接
+        获取持久数据库连接，如果连接不存在则自动初始化
         
         Returns:
             aiosqlite.Connection: 数据库连接
             
         Raises:
-            RuntimeError: 如果连接未初始化
+            RuntimeError: 如果连接初始化失败
         """
         if not self.db_connection:
-            raise RuntimeError("数据库连接未初始化，请先调用 initialize() 方法")
+            logger.warning("🔄 数据库连接未找到，尝试重新初始化...")
+            try:
+                await self.initialize()
+                logger.info("✅ 数据库连接重新初始化成功")
+                
+                # 验证连接是否真正可用
+                await self.db_connection.execute("SELECT 1")
+                logger.info("✅ 数据库连接验证成功")
+            except Exception as e:
+                logger.error(f"❌ 数据库连接重新初始化失败: {e}")
+                # 尝试强制重新创建连接
+                try:
+                    self.db_connection = None
+                    await self.initialize()
+                    logger.info("✅ 强制重新创建数据库连接成功")
+                except Exception as retry_e:
+                    logger.error(f"❌ 强制重新创建连接也失败: {retry_e}")
+                    raise RuntimeError("数据库连接完全失败") from retry_e
+        
+        # 验证连接是否仍然有效
+        try:
+            await self.db_connection.execute("SELECT 1")
+        except Exception as e:
+            logger.warning(f"🔄 数据库连接验证失败，尝试重新连接: {e}")
+            try:
+                # 安全关闭旧连接
+                if self.db_connection:
+                    try:
+                        await self.db_connection.close()
+                        logger.info("✅ 旧数据库连接已关闭")
+                    except:
+                        logger.warning("⚠️ 关闭旧连接时出现问题，继续创建新连接")
+                
+                # 重置连接并重新初始化
+                self.db_connection = None
+                await self.initialize()
+                logger.info("✅ 数据库连接重连成功")
+                
+                # 再次验证新连接
+                await self.db_connection.execute("SELECT 1")
+                logger.info("✅ 新连接验证成功")
+            except Exception as re_e:
+                logger.error(f"❌ 数据库重连失败: {re_e}")
+                raise RuntimeError("数据库连接重连失败") from re_e
+                
         return self.db_connection
     
     async def _execute_with_retry(self, operation, max_retries: int = 3):
@@ -385,7 +465,7 @@ class DatabaseManager:
                 batch_data.append((
                     player_data.get('player_id'),
                     player_data.get('display_name', ''),
-                    player_data.get('chips', 10000),
+                    player_data.get('chips', 3000),
                     player_data.get('level', 1),
                     player_data.get('experience', 0),
                     player_data.get('total_games', 0),
@@ -413,10 +493,24 @@ class DatabaseManager:
             return True
         
         try:
-            return await self._execute_with_retry(_batch_save_operation)
+            result = await self._execute_with_retry(_batch_save_operation)
+            logger.info(f"✅ 批量保存 {len(players_data)} 个玩家数据成功")
+            return result
         except Exception as e:
-            logger.error(f"批量保存玩家数据失败: {e}")
-            return False
+            logger.error(f"💥 批量保存玩家数据失败: {e}")
+            logger.error(f"数据库连接状态: {self.db_connection}")
+            
+            # 尝试重新初始化数据库连接
+            try:
+                logger.info("🔄 尝试重新初始化数据库连接...")
+                await self.initialize()
+                logger.info("✅ 数据库连接重新初始化成功，重试批量保存...")
+                result = await self._execute_with_retry(_batch_save_operation)
+                logger.info(f"✅ 重试后批量保存成功")
+                return result
+            except Exception as retry_e:
+                logger.error(f"💥 重试批量保存也失败了: {retry_e}")
+                return False
     
     async def save_player_data(self, player_id: str, player_data: Dict[str, Any]) -> bool:
         """
@@ -444,7 +538,7 @@ class DatabaseManager:
             """, (
                 player_id,
                 player_data.get('display_name', ''),
-                player_data.get('chips', 10000),
+                player_data.get('chips', 3000),
                 player_data.get('level', 1),
                 player_data.get('experience', 0),
                 player_data.get('total_games', 0),
@@ -468,10 +562,21 @@ class DatabaseManager:
             return True
         
         try:
-            return await self._execute_with_retry(_save_operation)
+            result = await self._execute_with_retry(_save_operation)
+            return result
         except Exception as e:
-            logger.error(f"保存玩家数据失败 {player_id}: {e}")
-            return False
+            logger.error(f"💥 保存玩家数据失败 {player_id}: {e}")
+            
+            # 尝试重新初始化数据库连接
+            try:
+                logger.info("🔄 尝试重新初始化数据库连接...")
+                await self.initialize()
+                result = await self._execute_with_retry(_save_operation)
+                logger.info(f"✅ 重试后保存玩家数据成功: {player_id}")
+                return result
+            except Exception as retry_e:
+                logger.error(f"💥 重试保存玩家数据也失败了 {player_id}: {retry_e}")
+                return False
     
     async def get_player_data(self, player_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -690,10 +795,21 @@ class DatabaseManager:
             return True
         
         try:
-            return await self._execute_with_retry(_log_transaction_operation)
+            result = await self._execute_with_retry(_log_transaction_operation)
+            return result
         except Exception as e:
-            logger.error(f"记录交易日志失败: {e}")
-            return False
+            logger.error(f"💥 记录交易日志失败: {e}")
+            
+            # 尝试重新初始化数据库连接
+            try:
+                logger.info("🔄 尝试重新初始化数据库连接...")
+                await self.initialize()
+                result = await self._execute_with_retry(_log_transaction_operation)
+                logger.info(f"✅ 重试后交易日志记录成功: {player_id}")
+                return result
+            except Exception as retry_e:
+                logger.error(f"💥 重试记录交易日志也失败了: {retry_e}")
+                return False
     
     async def get_player_transactions(self, player_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """

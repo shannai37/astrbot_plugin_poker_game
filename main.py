@@ -1,12 +1,10 @@
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-import astrbot.api.message_components as Comp
-from astrbot.core.utils.session_waiter import session_waiter, SessionController
 
 import asyncio
 import json
-from typing import Dict, List, Optional, Any, Callable, Tuple
+from typing import Dict, List, Optional, Any, Callable, Tuple, AsyncGenerator
 from dataclasses import dataclass, asdict
 from enum import Enum
 import random
@@ -46,7 +44,7 @@ def handle_plugin_exception(operation_name: str):
     return decorator
 
 
-@register("texas_holdem", "山萘", "德州扑克游戏插件 - 支持多人游戏、积分系统、房间管理", "1.0.0")
+@register("texas_holdem", "山萘", "德州扑克游戏插件 - 支持多人游戏、积分系统、房间管理", "1.1.0")
 class TexasHoldemPlugin(Star):
     """
     德州扑克插件主类
@@ -68,7 +66,7 @@ class TexasHoldemPlugin(Star):
         super().__init__(context)
         
         # 初始化数据目录
-        self.data_dir = self.get_data_dir()
+        self.data_dir = Path("data/plugins/texas_holdem_data")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
         # 初始化核心组件
@@ -77,9 +75,12 @@ class TexasHoldemPlugin(Star):
         self.room_manager = RoomManager(self.database_manager, self.player_manager)
         self.ui_builder = GameUIBuilder()
         
+        # 初始化标志
+        self.is_initialized = False
+        
         # 插件配置（硬编码默认值）
         self.plugin_config = {
-            "initial_chips": 10000,  # 与PlayerInfo默认值保持一致
+            "initial_chips": 3000,  # 与PlayerInfo默认值保持一致
             "daily_bonus": 100, 
             "blind_levels": [1, 2, 5, 10, 25, 50],
             "timeout_seconds": 30,
@@ -128,14 +129,77 @@ class TexasHoldemPlugin(Star):
         创建必要的数据表，加载历史数据
         """
         try:
+            logger.info("=" * 50)
+            logger.info("🚀 开始初始化德州扑克插件...")
+            logger.info("=" * 50)
+            
+            # 确保数据目录存在
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"✅ 数据目录已确保存在: {self.data_dir}")
+            
+            # 检查数据库管理器状态
+            logger.info("🔍 检查数据库管理器状态...")
+            logger.info(f"数据库管理器类型: {type(self.database_manager)}")
+            logger.info(f"数据库文件路径: {self.database_manager.db_file if hasattr(self.database_manager, 'db_file') else '未知'}")
+            
+            # 初始化数据库管理器
+            logger.info("🔧 正在初始化数据库管理器...")
             await self.database_manager.initialize()
+            logger.info("✅ 数据库管理器初始化完成")
+            
+            # 验证数据库连接
+            logger.info("🧪 验证数据库连接...")
+            if hasattr(self.database_manager, 'db_connection') and self.database_manager.db_connection:
+                # 测试连接
+                try:
+                    await self.database_manager.db_connection.execute("SELECT 1")
+                    logger.info("✅ 数据库连接正常")
+                except Exception as e:
+                    logger.error(f"❌ 数据库连接测试失败: {e}")
+                    raise Exception("数据库连接测试失败") from e
+            else:
+                logger.error("❌ 数据库连接对象不存在")
+                raise Exception("数据库连接对象不存在")
+            
+            # 加载玩家数据
+            logger.info("👥 正在加载玩家数据...")
             await self.player_manager.load_players()
+            logger.info(f"✅ 玩家数据加载完成，当前玩家数: {len(self.player_manager.players)}")
+            
             # 启动自动保存任务
+            logger.info("💾 启动玩家数据自动保存任务...")
             self.player_manager.start_auto_save()
+            logger.info("✅ 自动保存任务已启动")
+            
+            # 加载房间数据
+            logger.info("🏠 正在加载房间数据...")
             await self.room_manager.load_rooms()
-            logger.info("德州扑克插件数据初始化完成")
+            logger.info(f"✅ 房间数据加载完成，当前房间数: {len(self.room_manager.rooms)}")
+            
+            self.is_initialized = True
+            logger.info("=" * 50)
+            logger.info("🎉 德州扑克插件初始化完全成功!")
+            logger.info("=" * 50)
+            
         except Exception as e:
-            logger.error(f"插件初始化失败: {e}")
+            logger.error("=" * 50)
+            logger.error("💥 插件初始化失败!")
+            logger.error(f"错误类型: {type(e).__name__}")
+            logger.error(f"错误信息: {str(e)}")
+            logger.error("=" * 50)
+            
+            import traceback
+            logger.error("完整错误栈:")
+            logger.error(traceback.format_exc())
+            
+            self.is_initialized = False
+            # 尝试清理已初始化的组件
+            try:
+                if hasattr(self.player_manager, 'stop_auto_save'):
+                    self.player_manager.stop_auto_save()
+                    logger.info("🧹 自动保存任务已停止")
+            except Exception as cleanup_error:
+                logger.error(f"清理过程中发生错误: {cleanup_error}")
             raise
 
     @filter.on_astrbot_loaded()
@@ -143,15 +207,23 @@ class TexasHoldemPlugin(Star):
         """AstrBot启动完成时初始化插件"""
         await self.initialize_plugin()
 
+    async def ensure_initialized(self):
+        """确保插件已初始化"""
+        if not self.is_initialized:
+            await self.initialize_plugin()
+
     # ==================== 玩家游戏指令 ====================
     
     @filter.command("poker")
-    async def poker_main(self, event: AstrMessageEvent):
+    async def poker_main(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
         德州扑克主命令入口
         
         Args:
             event: 消息事件对象
+            
+        Yields:
+            消息结果对象
         """
         help_text = """🎰 德州扑克游戏
 
@@ -159,8 +231,9 @@ class TexasHoldemPlugin(Star):
 • /poker_help - 查看完整帮助
 • /poker_status - 查看个人状态
 • /poker_game_status - 查看当前游戏状态
-• /poker_achievements - 查看成就
+• /poker_achievements [页数] - 查看成就（支持翻页）
 • /poker_equip [成就ID] - 装备成就
+• /poker_leaderboard [页数] - 查看排行榜（支持翻页）
 • /poker_rooms - 查看房间列表
 
 🏠 房间操作：
@@ -183,7 +256,7 @@ class TexasHoldemPlugin(Star):
         yield event.plain_result(help_text)
     
     @filter.command("poker_help")
-    async def poker_help(self, event: AstrMessageEvent):
+    async def poker_help(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
         显示德州扑克插件帮助信息
         
@@ -196,23 +269,31 @@ class TexasHoldemPlugin(Star):
 • /poker_join [房间号] - 加入指定房间
 • /poker_leave - 离开当前游戏
 • /poker_status - 查看个人状态
-• /poker_achievements - 查看成就
+• /poker_achievements [页数] - 查看成就（支持翻页）
 • /poker_equip [成就ID] - 装备成就
 
 📊 统计查询：
 • /poker_stats - 查看详细统计
+• /poker_leaderboard [页数] - 查看排行榜（支持翻页）
 
 🏠 房间管理：
 • /poker_rooms - 查看所有房间
-• /poker_create [盲注级别] - 创建房间
+• /poker_create [盲注级别] - 创建房间（盲注级别 1-6）
+  ┌─ 💡 盲注级别说明 ─┐
+  │ 1: 1/2     4: 10/20  │
+  │ 2: 2/4     5: 25/50  │
+  │ 3: 5/10    6: 50/100 │
+  └──────────────────────┘
+• /poker_quickjoin - 快速匹配
 • /poker_start - 开始游戏（需至少2人）
 
 🎯 游戏中操作：
 • /poker_call - 跟注
-• /poker_raise [金额] - 加注
+• /poker_raise [金额] - 加注到指定金额
 • /poker_fold - 弃牌
 • /poker_check - 过牌
 • /poker_allin - 全押
+• /poker_exit - 紧急退出
 
 👑 管理员指令：
 • /poker_admin - 管理面板
@@ -220,144 +301,16 @@ class TexasHoldemPlugin(Star):
 • /poker_admin_ban - 封禁玩家
 • /poker_admin_unban - 解封玩家
 
-💰 初始积分: {initial_chips} 筹码
-⏰ 操作超时: {timeout} 秒""".format(
-            initial_chips=self.plugin_config["initial_chips"],
-            timeout=self.plugin_config["timeout_seconds"]
-        )
+💰 初始积分: 3000 筹码
+⏰ 操作超时: 120 秒（90秒时警告）
+
+🎯 祝您游戏愉快！"""
         
         yield event.plain_result(help_text)
 
-    @filter.command("poker_debug")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def debug_game_state(self, event: AstrMessageEvent):
-        """
-        深度调试游戏状态
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            room = await self.room_manager.get_player_room(user_id)
-            if not room or not room.game:
-                yield event.plain_result("❌ 您当前不在任何游戏中")
-                return
-            
-            game = room.game
-            
-            # 收集详细的调试信息
-            debug_info = f"""🐛 游戏调试信息
-
-🎮 基本状态:
-• 房间ID: {room.room_id}
-• 游戏阶段: {game.game_phase.value}
-• 当前轮次: {game.hand_number}
-• 当前最高下注: {game.current_bet}
-• 总底池: {game.main_pot}
-
-👤 当前玩家:
-• 当前行动玩家ID: {game.current_player_id}
-• 当前玩家索引: {game.current_player_index}
-• 最后加注玩家: {game.last_raise_player_id}
-
-👥 玩家列表:
-• 玩家顺序: {game.player_order}
-• 活跃玩家: {game.active_players}
-
-📊 详细玩家状态:"""
-            
-            for i, player_id in enumerate(game.player_order):
-                player = game.players[player_id]
-                is_current = "👈 当前" if player_id == game.current_player_id else ""
-                is_active = "✅" if player_id in game.active_players else "❌"
-                
-                debug_info += f"""
-{i}: {player_id[:8]} {is_current}
-   状态: {player.status.value} {is_active}
-   筹码: {player.chips} | 当前下注: {player.current_bet} | 总下注: {player.total_bet}
-   最后操作: {player.last_action.value if player.last_action else 'None'}
-   可行动: {player.can_act()} | 在牌局: {player.is_in_hand()}
-   位置: {'庄家' if player.is_dealer else ''}{'小盲' if player.is_small_blind else ''}{'大盲' if player.is_big_blind else ''}"""
-            
-            debug_info += f"""
-
-🔄 轮转逻辑检查:
-• 下注轮次完成: {game._is_betting_round_complete()}
-• 在牌局玩家数: {len([p for p in game.players.values() if p.is_in_hand()])}
-• 可行动玩家数: {len([p for p in game.players.values() if p.can_act()])}
-• 最高下注: {max(p.current_bet for p in game.players.values() if p.is_in_hand()) if game.players else 0}
-
-🎴 公共牌: {' '.join([str(card) for card in game.community_cards]) if game.community_cards else '无'}"""
-            
-            yield event.plain_result(debug_info)
-            
-        except Exception as e:
-            logger.error(f"调试失败: {e}")
-            yield event.plain_result(f"❌ 调试失败: {str(e)}")
-
-    @filter.command("poker_fix_turn")
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    async def fix_turn_order(self, event: AstrMessageEvent):
-        """
-        强制修复玩家轮转顺序
-        
-        Args:
-            event: 消息事件对象
-        """
-        user_id = event.get_sender_id()
-        
-        try:
-            room = await self.room_manager.get_player_room(user_id)
-            if not room or not room.game:
-                yield event.plain_result("❌ 您当前不在任何游戏中")
-                return
-            
-            game = room.game
-            
-            # 记录修复前状态
-            old_current = game.current_player_id
-            old_active = game.active_players.copy()
-            
-            # 强制重新计算活跃玩家和当前玩家
-            game.active_players = [
-                pid for pid in game.player_order 
-                if game.players[pid].is_in_hand() and game.players[pid].can_act()
-            ]
-            
-            if game.active_players:
-                # 如果当前玩家仍在活跃列表中，保持不变
-                if game.current_player_id in game.active_players:
-                    game.current_player_index = game.active_players.index(game.current_player_id)
-                else:
-                    # 否则设置为第一个活跃玩家
-                    game.current_player_index = 0
-                    game.current_player_id = game.active_players[0]
-                
-                result_msg = f"""🔧 轮转修复完成
-                
-修复前:
-• 当前玩家: {old_current}
-• 活跃玩家: {', '.join([pid[:8] for pid in old_active])}
-
-修复后:
-• 当前玩家: {game.current_player_id}
-• 活跃玩家: {', '.join([pid[:8] for pid in game.active_players])}
-• 当前索引: {game.current_player_index}/{len(game.active_players)}
-
-💡 请使用 /poker_debug 查看详细状态"""
-                
-                yield event.plain_result(result_msg)
-            else:
-                yield event.plain_result("❌ 没有活跃玩家，游戏可能已结束")
-                
-        except Exception as e:
-            logger.error(f"修复轮转失败: {e}")
-            yield event.plain_result(f"❌ 修复轮转失败: {str(e)}")
 
     @filter.command("poker_exit")
-    async def emergency_exit(self, event: AstrMessageEvent):
+    async def emergency_exit(self, event: AstrMessageEvent) -> AsyncGenerator:
         """退出游戏并返回筹码（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_emergency_exit(event):
@@ -366,7 +319,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_game_status")
-    async def game_status(self, event: AstrMessageEvent):
+    async def game_status(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
         查看当前游戏详细状态
         
@@ -386,7 +339,7 @@ class TexasHoldemPlugin(Star):
             # 构建详细的游戏状态信息
             status_info = f"""🎮 游戏状态详情
             
-🏠 房间ID: {room.room_id}
+🏠 房间ID: {room.room_id[:8]}
 🎯 游戏阶段: {game_state.get('phase', 'unknown')}
 🎲 局数: {game_state.get('hand_number', 0)}
 💰 总底池: {game_state.get('main_pot', 0)}
@@ -425,16 +378,94 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result(f"❌ 查看游戏状态失败: {str(e)}")
 
     @filter.command("poker_join")
-    async def join_room(self, event: AstrMessageEvent, room_id: str = ""):
-        """加入指定房间或快速匹配（委托给handler处理）"""
+    async def join_room(self, event: AstrMessageEvent, room_id: str = "") -> AsyncGenerator:
+        """加入指定房间（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_join_room(event, room_id):
                 yield result
         else:
             yield event.plain_result("❌ 游戏处理器未初始化")
 
+    @filter.command("poker_quickjoin")
+    async def quickjoin_room(self, event: AstrMessageEvent) -> AsyncGenerator:
+        """快速匹配房间"""
+        user_id = event.get_sender_id()
+        
+        try:
+            await self.ensure_initialized()
+            
+            # 检查玩家是否已在房间中
+            existing_room = await self.room_manager.get_player_room(user_id)
+            if existing_room:
+                yield event.plain_result(f"❌ 您已在房间 {existing_room.room_id[:8]} 中")
+                return
+            
+            # 确保玩家已注册
+            player = await self.player_manager.get_or_create_player(user_id, event.get_sender_name() or f"Player_{user_id[-8:]}")
+            if not player:
+                yield event.plain_result("❌ 玩家注册失败")
+                return
+            
+            # 获取所有可用房间
+            all_rooms = await self.room_manager.get_all_rooms()
+            available_rooms = [
+                room for room in all_rooms.values() 
+                if room.status.name in ['WAITING', 'PLAYING'] and len(room.player_ids) < room.max_players
+            ]
+            
+            if not available_rooms:
+                # 没有可用房间，自动创建一个
+                yield event.plain_result("🔍 未找到可用房间，正在为您创建新房间...")
+                
+                room = await self.room_manager.create_room(
+                    creator_id=user_id,
+                    small_blind=1,
+                    big_blind=2,
+                    max_players=6
+                )
+                
+                if room:
+                    yield event.plain_result(f"""✅ 快速匹配成功！自动创建房间
+🏠 房间号: {room.room_id[:8]}
+💰 盲注: 1/2
+👤 房主: {player.display_name}
+📋 状态: 等待更多玩家
+
+🎯 等待其他玩家加入，或使用 /poker_start 开始游戏（至少2人）""")
+                else:
+                    yield event.plain_result("❌ 创建房间失败")
+                return
+            
+            # 选择最合适的房间（优先选择人数较多但未满的房间）
+            available_rooms.sort(key=lambda r: len(r.player_ids), reverse=True)
+            target_room = available_rooms[0]
+            
+            # 加入房间
+            success = await self.room_manager.add_player_to_room(target_room.room_id, user_id)
+            
+            if success:
+                updated_room = await self.room_manager.get_room(target_room.room_id)
+                yield event.plain_result(f"""🎉 快速匹配成功！
+🏠 房间号: {target_room.room_id[:8]}
+💰 盲注: {updated_room.small_blind}/{updated_room.big_blind}
+👥 当前人数: {len(updated_room.player_ids)}/{updated_room.max_players}
+📋 房间状态: {updated_room.status.name}
+
+💡 使用 /poker_start 开始游戏（需要房主操作）""")
+                
+                # 如果房间已有足够玩家，提示可以开始游戏
+                if len(updated_room.player_ids) >= 2:
+                    yield event.plain_result("🚀 房间已有足够玩家，房主可以开始游戏了！")
+                    
+            else:
+                yield event.plain_result("❌ 加入房间失败")
+                
+        except Exception as e:
+            logger.error(f"快速匹配失败: {e}")
+            yield event.plain_result(f"❌ 快速匹配失败: {str(e)}")
+
     @filter.command("poker_leave")
-    async def leave_room(self, event: AstrMessageEvent):
+    async def leave_room(self, event: AstrMessageEvent) -> AsyncGenerator:
         """离开当前房间（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_leave_room(event):
@@ -443,16 +474,16 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_achievements")
-    async def achievements_view(self, event: AstrMessageEvent):
-        """查看成就进度（委托给handler处理）"""
+    async def achievements_view(self, event: AstrMessageEvent, page: int = 1) -> AsyncGenerator:
+        """查看成就进度（委托给handler处理）- 支持翻页"""
         if self.game_handler:
-            async for result in self.game_handler.handle_achievements(event):
+            async for result in self.game_handler.handle_achievements(event, page):
                 yield result
         else:
             yield event.plain_result("❌ 游戏处理器未初始化")
     
     @filter.command("poker_equip")
-    async def equip_achievement(self, event: AstrMessageEvent, achievement_id: str = ""):
+    async def equip_achievement(self, event: AstrMessageEvent, achievement_id: str = "") -> AsyncGenerator:
         """装备成就（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_equip_achievement(event, achievement_id or None):
@@ -461,7 +492,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_status")
-    async def player_status(self, event: AstrMessageEvent):
+    async def player_status(self, event: AstrMessageEvent) -> AsyncGenerator:
         """查看玩家个人状态（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_player_status(event):
@@ -470,7 +501,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_stats")
-    async def player_stats(self, event: AstrMessageEvent):
+    async def player_stats(self, event: AstrMessageEvent) -> AsyncGenerator:
         """查看玩家详细统计（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_player_stats(event):
@@ -479,7 +510,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_rooms")
-    async def list_rooms(self, event: AstrMessageEvent):
+    async def list_rooms(self, event: AstrMessageEvent) -> AsyncGenerator:
         """查看所有可用房间（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_rooms_list(event):
@@ -488,7 +519,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_create")
-    async def create_room(self, event: AstrMessageEvent, blind_level: int = 1):
+    async def create_room(self, event: AstrMessageEvent, blind_level: int = 1) -> AsyncGenerator:
         """创建新房间（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_create_room(event, blind_level):
@@ -497,7 +528,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_start")
-    async def start_game(self, event: AstrMessageEvent):
+    async def start_game(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
         开始房间内的游戏
         
@@ -545,25 +576,82 @@ class TexasHoldemPlugin(Star):
                     player = await self.player_manager.get_or_create_player(player_id)
                     buy_in = min(player.chips, room.max_buy_in)
                     buy_in = max(buy_in, room.min_buy_in)
-                    room.game.add_player(player_id, buy_in)
+                    # 调用修复后的add_player方法，传递display_name
+                    room.game.add_player(player_id, buy_in, player.display_name)
             
             # 开始新一局
             if room.game.start_new_hand():
                 yield event.plain_result("🎉 游戏开始！")
                 
+                # 显示盲注信息和当前行动玩家
+                small_blind_player = None
+                big_blind_player = None
+                current_player = room.game.players.get(room.game.current_player_id)
+                
+                # 查找盲注玩家
+                for player in room.game.players.values():
+                    if hasattr(player, 'position'):
+                        if player.position == 'SB':
+                            small_blind_player = player
+                        elif player.position == 'BB':
+                            big_blind_player = player
+                
+                blind_info = f"""💰 盲注信息：
+• 小盲注: {room.game.small_blind} 筹码{' ('+small_blind_player.display_name+')' if small_blind_player else ''}
+• 大盲注: {room.game.big_blind} 筹码{' ('+big_blind_player.display_name+')' if big_blind_player else ''}"""
+                
+                if current_player:
+                    blind_info += f"\n🎲 首先行动: {current_player.display_name}"
+                
+                yield event.plain_result(blind_info)
+                
                 # 发送游戏状态
                 game_status = self.ui_builder.build_game_status(room.game)
                 yield event.plain_result(game_status)
+            
+                # 发送开始游戏的详细说明
+                start_info = f"""
+🎉 德州扑克游戏正式开始！
+
+🎴 发牌完成：
+• 每位玩家已获得2张底牌（私聊查看）
+• 接下来将进行翻牌前下注
+
+🎯 游戏流程：
+1️⃣ Pre-flop（翻牌前）- 基于底牌下注
+2️⃣ Flop（翻牌）- 3张公共牌
+3️⃣ Turn（转牌）- 第4张公共牌  
+4️⃣ River（河牌）- 第5张公共牌
+5️⃣ Showdown（摊牌）- 比较牌型
+
+💡 操作说明：
+• /poker_call - 跟注
+• /poker_raise [金额] - 加注
+• /poker_fold - 弃牌
+• /poker_check - 过牌（无需下注时）
+• /poker_allin - 全押
+
+🔔 注意：轮到您行动时会有提示！"""
+
+                yield event.plain_result(start_info)
                 
                 # 给每个玩家发送私聊手牌
+                private_success_count = 0
                 for player_id in room.player_ids:
                     if player_id in room.game.players:
                         try:
                             await self._send_private_cards(event, player_id, room.game)
+                            private_success_count += 1
                         except Exception as e:
                             logger.error(f"发送手牌给玩家 {player_id} 失败: {e}")
                             # 私聊失败时，不在公共频道显示手牌，只提示发送失败
                             yield event.plain_result(f"⚠️ 无法向玩家 {player_id[:8]} 发送手牌，请检查好友关系或私聊设置。")
+                
+                # 汇总私聊发牌结果
+                if private_success_count == len(room.player_ids):
+                    yield event.plain_result("✅ 所有玩家的底牌已通过私聊发送")
+                else:
+                    yield event.plain_result(f"⚠️ {private_success_count}/{len(room.player_ids)} 位玩家成功接收私聊手牌")
             else:
                 yield event.plain_result("❌ 游戏开始失败，请检查游戏状态")
                 
@@ -574,7 +662,7 @@ class TexasHoldemPlugin(Star):
     # ==================== 游戏中操作 ====================
     
     @filter.command("poker_call")
-    async def game_call(self, event: AstrMessageEvent):
+    async def game_call(self, event: AstrMessageEvent) -> AsyncGenerator:
         """跟注操作（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_game_call(event):
@@ -583,7 +671,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_raise")
-    async def game_raise(self, event: AstrMessageEvent, amount: int = None):
+    async def game_raise(self, event: AstrMessageEvent, amount: int = None) -> AsyncGenerator:
         """加注操作（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_game_raise(event, amount):
@@ -592,7 +680,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_fold")
-    async def game_fold(self, event: AstrMessageEvent):
+    async def game_fold(self, event: AstrMessageEvent) -> AsyncGenerator:
         """弃牌操作（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_game_fold(event):
@@ -601,7 +689,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_check")
-    async def game_check(self, event: AstrMessageEvent):
+    async def game_check(self, event: AstrMessageEvent) -> AsyncGenerator:
         """过牌操作（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_game_check(event):
@@ -610,7 +698,7 @@ class TexasHoldemPlugin(Star):
             yield event.plain_result("❌ 游戏处理器未初始化")
 
     @filter.command("poker_allin")
-    async def game_allin(self, event: AstrMessageEvent):
+    async def game_allin(self, event: AstrMessageEvent) -> AsyncGenerator:
         """全押操作（委托给handler处理）"""
         if self.game_handler:
             async for result in self.game_handler.handle_game_allin(event):
@@ -621,7 +709,7 @@ class TexasHoldemPlugin(Star):
 
     # ==================== 辅助方法 ====================
     
-    async def _validate_player_turn(self, event: AstrMessageEvent, user_id: str):
+    async def _validate_player_turn(self, event: AstrMessageEvent, user_id: str) -> Tuple[Optional[object], Optional[str]]:
         """
         验证玩家是否可以进行游戏操作
         
@@ -691,7 +779,7 @@ class TexasHoldemPlugin(Star):
     
     @filter.command("poker_admin")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_panel(self, event: AstrMessageEvent):
+    async def admin_panel(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
         管理员主面板
         
@@ -712,7 +800,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_players")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_players(self, event: AstrMessageEvent, limit: int = 20):
+    async def admin_players(self, event: AstrMessageEvent, limit: int = 20) -> AsyncGenerator:
         """
         查看玩家列表
         
@@ -760,7 +848,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_ban")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_ban_player(self, event: AstrMessageEvent, player_id: str, duration: int = 0, reason: str = "管理员操作"):
+    async def admin_ban_player(self, event: AstrMessageEvent, player_id: str, duration: int = 0, reason: str = "管理员操作") -> AsyncGenerator:
         """
         封禁玩家
         
@@ -789,7 +877,7 @@ class TexasHoldemPlugin(Star):
                 room = await self.room_manager.get_player_room(player_id)
                 if room:
                     await self.room_manager.leave_room(room.room_id, player_id)
-                    yield event.plain_result(f"🏠 已将玩家从房间 {room.room_id} 中移除")
+                    yield event.plain_result(f"🏠 已将玩家从房间 {room.room_id[:8]} 中移除")
             else:
                 yield event.plain_result(f"❌ 封禁失败，玩家不存在: {player_id}")
                 
@@ -799,7 +887,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_unban")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_unban_player(self, event: AstrMessageEvent, player_id: str):
+    async def admin_unban_player(self, event: AstrMessageEvent, player_id: str) -> AsyncGenerator:
         """
         解封玩家
         
@@ -828,7 +916,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_addchips")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_add_chips(self, event: AstrMessageEvent, player_id: str, amount: int, reason: str = "管理员补充"):
+    async def admin_add_chips(self, event: AstrMessageEvent, player_id: str, amount: int, reason: str = "管理员补充") -> AsyncGenerator:
         """
         给玩家增加筹码
         
@@ -870,7 +958,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_reset")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_reset_player(self, event: AstrMessageEvent, player_id: str, keep_chips: bool = False):
+    async def admin_reset_player(self, event: AstrMessageEvent, player_id: str, keep_chips: bool = False) -> AsyncGenerator:
         """
         重置玩家数据
         
@@ -898,7 +986,7 @@ class TexasHoldemPlugin(Star):
                 room = await self.room_manager.get_player_room(player_id)
                 if room:
                     await self.room_manager.leave_room(room.room_id, player_id)
-                    yield event.plain_result(f"🏠 已将玩家从房间 {room.room_id} 中移除")
+                    yield event.plain_result(f"🏠 已将玩家从房间 {room.room_id[:8]} 中移除")
             else:
                 yield event.plain_result(f"❌ 重置失败，玩家不存在: {player_id}")
                 
@@ -908,7 +996,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_rooms")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_rooms(self, event: AstrMessageEvent):
+    async def admin_rooms(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
         查看所有房间状态
         
@@ -960,7 +1048,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_close")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_close_room(self, event: AstrMessageEvent, room_id: str, reason: str = "管理员关闭"):
+    async def admin_close_room(self, event: AstrMessageEvent, room_id: str, reason: str = "管理员关闭") -> AsyncGenerator:
         """
         强制关闭房间
         
@@ -997,7 +1085,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_kick")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_kick_player(self, event: AstrMessageEvent, player_id: str, reason: str = "管理员操作"):
+    async def admin_kick_player(self, event: AstrMessageEvent, player_id: str, reason: str = "管理员操作") -> AsyncGenerator:
         """
         踢出玩家
         
@@ -1027,7 +1115,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_stats")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_detailed_stats(self, event: AstrMessageEvent):
+    async def admin_detailed_stats(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
         详细系统统计
         
@@ -1079,7 +1167,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_backup")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_backup(self, event: AstrMessageEvent):
+    async def admin_backup(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
         备份数据库
         
@@ -1092,7 +1180,7 @@ class TexasHoldemPlugin(Star):
             
             # 生成备份文件名（使用插件数据目录）
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_dir = self.get_data_dir() / "backups"
+            backup_dir = self.data_dir / "backups"
             backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path = backup_dir / f"texas_holdem_backup_{timestamp}.db"
             
@@ -1113,7 +1201,7 @@ class TexasHoldemPlugin(Star):
 
     @filter.command("poker_admin_config")
     @filter.permission_type(filter.PermissionType.ADMIN)
-    async def admin_config(self, event: AstrMessageEvent):
+    async def admin_config(self, event: AstrMessageEvent) -> AsyncGenerator:
         """
         查看系统配置
         
@@ -1146,6 +1234,25 @@ class TexasHoldemPlugin(Star):
         except Exception as e:
             logger.error(f"查看配置失败: {e}")
             yield event.plain_result(f"❌ 查看配置失败: {str(e)}")
+
+    @filter.command("poker_admin_banned")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def admin_banned_list(self, event: AstrMessageEvent, page: int = 1) -> AsyncGenerator:
+        """查看封禁玩家列表（委托给handler处理）"""
+        if self.admin_handler:
+            async for result in self.admin_handler.handle_admin_banned_list(event, page):
+                yield result
+        else:
+            yield event.plain_result("❌ 管理员处理器未初始化")
+
+    @filter.command("poker_leaderboard")
+    async def leaderboard(self, event: AstrMessageEvent, page: int = 1) -> AsyncGenerator:
+        """查看排行榜（委托给handler处理）"""
+        if self.game_handler:
+            async for result in self.game_handler.handle_leaderboard(event, page):
+                yield result
+        else:
+            yield event.plain_result("❌ 游戏处理器未初始化")
 
     async def _send_private_message(self, event: AstrMessageEvent, user_id: str, message: str) -> bool:
         """
@@ -1506,6 +1613,7 @@ class TexasHoldemPlugin(Star):
         保存所有数据，关闭数据库连接
         """
         try:
+            await self.player_manager.cleanup()
             await self.room_manager.close_all_rooms()
             await self.database_manager.close()
             logger.info("德州扑克插件已安全卸载")

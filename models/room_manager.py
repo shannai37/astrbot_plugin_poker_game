@@ -224,6 +224,12 @@ class RoomManager:
             logger.warning(f"房间数量已达上限: {self.max_rooms}")
             return None
         
+        # 检查封禁状态
+        player = await self.player_manager.get_or_create_player(creator_id)
+        if player.is_banned:
+            logger.warning(f"玩家 {creator_id} 被封禁，无法创建房间")
+            return None
+        
         # 检查创建者是否已在其他房间
         if creator_id in self.player_room_mapping:
             existing_room_id = self.player_room_mapping[creator_id]
